@@ -62,6 +62,17 @@ async def on_message(message: discord.Message):
 
 
 # Commands
+@bot.command(name="compare", help="Compare NBA players for fantasy basketball. Usage: !compare player1 player2 [player3 ...]")
+async def compare(ctx, *players):
+    """Compare NBA players for fantasy basketball purposes."""
+    # Check if we have at least 2 players to compare
+    if len(players) < 2:
+        await ctx.send("Please provide at least 2 players to compare. Usage: !compare player1 player2 [player3 ...]")
+        return
+
+    logger.info(f"Comparing players: {', '.join(players)}")
+    response = await agent.compare_players(list(players))
+    await ctx.send(response)
 
 
 # This example command is here to show you how to add commands to the bot.
