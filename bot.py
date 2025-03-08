@@ -3,9 +3,8 @@ import discord
 import logging
 
 from discord.ext import commands
-from dotenv import load_dotenv
 from agent import MistralAgent
-
+from dotenv import load_dotenv
 PREFIX = "!"
 
 # Setup logging
@@ -73,6 +72,55 @@ async def compare(ctx, *players):
     logger.info(f"Comparing players: {', '.join(players)}")
     response = await agent.compare_players(list(players))
     await ctx.send(response)
+
+
+@bot.command(name="draft", help="Start a fantasy basketball draft. Usage: !draft rounds pick_position total_picks")
+async def draft(ctx, rounds: int, pick_position: int, total_picks: int):
+    """Start a fantasy basketball draft session."""
+    if rounds < 1 or pick_position < 1 or total_picks < 2 or pick_position > total_picks:
+        await ctx.send("Invalid draft parameters! Please ensure:\n"
+                      "- Rounds is at least 1\n"
+                      "- Pick position is between 1 and total picks\n"
+                      "- Total picks is at least 2")
+        return
+
+    response = await agent.start_draft(ctx.channel.id, rounds, pick_position, total_picks)
+    await ctx.send(response)
+
+
+@bot.command(name="pick", help="Record a draft pick. Usage: !pick player_name position")
+async def pick(ctx, player_name: str, position: str, *, rest: str = ""):
+    """Record a draft pick."""
+    # Check if draft exists and is active
+    if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
+        await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
+        return
+    
+    # Combine player name if it was split
+    full_player_name = f"{player_name} {rest}".strip()
+    
+    response = await agent.update_draft_pick(ctx.channel.id, full_player_name, position)
+    await ctx.send(response)
+
+
+@bot.command(name="myturn", help="Get draft recommendations when it's your turn")
+async def myturn(ctx):
+    """Get draft recommendations when it's your turn."""
+    # Check if draft exists and is active
+    if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
+        await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
+        return
+        
+    response = await agent.get_draft_recommendation(ctx.channel.id)
+    await ctx.send(response)
+
+
+@bot.command(name="players", help="Show the list of available NBA players ranked by fantasy value")
+async def players(ctx):
+    """Show the list of available NBA players."""
+    responses = await agent.show_players(ctx.channel.id)
+    for response in responses:
+        await ctx.send(response)
 
 
 # This example command is here to show you how to add commands to the bot.
