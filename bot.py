@@ -78,6 +78,7 @@ async def compare(ctx, *players):
         return
 
     logger.info(f"Comparing players: {', '.join(players)}")
+    await ctx.send("⌛ Please wait 20 seconds-2 minutes while I analyze these players thoroughly...")
     response = await agent.compare_players(list(players))
     await ctx.send(response)
 
