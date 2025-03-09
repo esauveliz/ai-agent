@@ -7,6 +7,7 @@ import aiohttp
 import logging
 from bs4 import BeautifulSoup
 import time
+from datetime import datetime
 
 # Setup logging
 logger = logging.getLogger("discord")
@@ -113,6 +114,30 @@ class MistralAgent:
         self.draft_states: Dict[int, DraftState] = {}
         self.cached_players: List[str] = []  # Cache for player rankings
         self.last_fetch_time = 0  # Track when we last fetched players
+        self.ESPN_PLAYER_IDS = {
+            # Stars and popular players
+            "Nikola Jokic": "3112335",
+            "LeBron James": "1966",
+            "Luka Doncic": "3945274",
+            "Stephen Curry": "3975",
+            "Kevin Durant": "3202",
+            "Giannis Antetokounmpo": "3032977",
+            "Joel Embiid": "3059318",
+            "Jayson Tatum": "4065648",
+            "Devin Booker": "3136193",
+            "Shai Gilgeous-Alexander": "4278073",
+            "Anthony Davis": "6583",
+            "Damian Lillard": "6606",
+            "Donovan Mitchell": "3908809",
+            "Ja Morant": "4279888",
+            "Trae Young": "4277905",
+            "Anthony Edwards": "4594268",
+            "Victor Wembanyama": "5088141",
+            "Tyrese Haliburton": "4395651",
+            "Kawhi Leonard": "6450",
+            "Paul George": "4251",
+            # Add more as needed
+        }
 
     def _update_history(self, channel_id: int, role: str, content: str):
         """Add a message to the channel's history and maintain history size."""
@@ -595,7 +620,7 @@ Draft Status:
         search_term = f"{available_players_str} NBA fantasy basketball rankings current stats injuries 2024"
         explanation = f"Getting current information about top available players: {available_players_str}"
         web_search_result = "<function_calls>\n<invoke name=\"web_search\">\n<parameter name=\"search_term\">" + search_term + "</parameter>\n<parameter name=\"explanation\">" + explanation + "</parameter>\n</invoke>\n</function_calls>"
-        
+
         messages = [
             {"role": "system", "content": f"""You are a fantasy basketball draft expert. Consider:
 1. Current round: {draft_state.current_round}/{draft_state.total_rounds}
@@ -625,7 +650,7 @@ Focus on:
             model=MISTRAL_MODEL,
             messages=messages,
         )
-        
+
         full_response = f"""Draft Analysis:
 {needs_str}
 {response.choices[0].message.content}"""
@@ -634,9 +659,17 @@ Focus on:
     async def web_search(self, query: str) -> str:
         """Perform a web search using the web_search tool."""
         try:
-            # Use the web_search tool directly
-            return f"<function_calls><invoke name=\"web_search\"><parameter name=\"search_term\">{query}</parameter><parameter name=\"explanation\">Getting current NBA player information</parameter></invoke></function_calls>"
+            # Make the actual web search call
+            search_results = await self.client.chat.complete_async(
+                model=MISTRAL_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a sports news assistant. Search the web for the latest NBA news and provide only factual, recent information. Focus on news from the last 24-48 hours."},
+                    {"role": "user", "content": f"Search for: {query}"}
+                ]
+            )
+            return search_results.choices[0].message.content
         except Exception as e:
+            logger.error(f"Error in web search for query '{query}': {str(e)}")
             return f"Error performing web search: {str(e)}"
 
     async def show_players(self, channel_id: int) -> List[str]:
@@ -763,3 +796,168 @@ Focus on:
         content.append(f"• Total Players Drafted: {len(draft_state.my_team)}")
         
         return self._split_into_messages('\n'.join(content))
+
+    async def _scrape_real_time_news(self, player_name: str) -> Optional[dict]:
+        """Get real-time news using NBA stats API and Basketball Reference."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://www.nba.com',
+            'Referer': 'https://www.nba.com/'
+        }
+        
+        try:
+            # Format player name for Basketball Reference URL
+            # Example: "Nikola Jokic" -> "jokicni01"
+            last_name = player_name.split()[-1].lower()
+            first_name = player_name.split()[0].lower()
+            bref_id = f"{last_name[:5]}{first_name[:2]}01"
+            
+            # URLs for different data sources
+            bref_url = f"https://www.basketball-reference.com/players/{last_name[0]}/{bref_id}.html"
+            
+            async with aiohttp.ClientSession() as session:
+                # Get latest game data from Basketball Reference
+                async with session.get(bref_url, headers=headers) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        
+                        # Get most recent game
+                        game_log = soup.find('div', id='div_pgl_basic')
+                        if game_log:
+                            latest_game = game_log.find('tr')  # First row is most recent
+                            if latest_game:
+                                date = latest_game.find('td', {'data-stat': 'date_game'})
+                                pts = latest_game.find('td', {'data-stat': 'pts'})
+                                reb = latest_game.find('td', {'data-stat': 'trb'})
+                                ast = latest_game.find('td', {'data-stat': 'ast'})
+                                opp = latest_game.find('td', {'data-stat': 'opp_id'})
+                                
+                                if all([date, pts, reb, ast, opp]):
+                                    return {
+                                        'source': 'Basketball Reference',
+                                        'date': date.text,
+                                        'type': 'Game Performance',
+                                        'headline': f"{player_name} vs {opp.text}",
+                                        'description': f"Latest Game Stats: {pts.text} PTS, {reb.text} REB, {ast.text} AST"
+                                    }
+                
+                # If we can't get the latest game, try to get their next game
+                schedule_url = "https://www.basketball-reference.com/leagues/NBA_2025_games.html"
+                async with session.get(schedule_url, headers=headers) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        
+                        # Find next game involving the player's team
+                        schedule = soup.find('div', id='div_schedule')
+                        if schedule:
+                            upcoming_games = schedule.find_all('tr')
+                            for game in upcoming_games:
+                                if last_name.lower() in game.text.lower():
+                                    date = game.find('th', {'data-stat': 'date_game'})
+                                    visitor = game.find('td', {'data-stat': 'visitor_team_name'})
+                                    home = game.find('td', {'data-stat': 'home_team_name'})
+                                    if all([date, visitor, home]):
+                                        return {
+                                            'source': 'Basketball Reference',
+                                            'date': date.text,
+                                            'type': 'Upcoming Game',
+                                            'headline': f"{player_name}'s Next Game",
+                                            'description': f"{visitor.text} @ {home.text}"
+                                        }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting stats for {player_name}: {str(e)}")
+            return None
+
+    async def _get_espn_player_id(self, player_name: str) -> Optional[str]:
+        """Find ESPN player ID by searching their site."""
+        try:
+            search_url = f"https://www.espn.com/nba/players/_/search/{player_name.replace(' ', '+')}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(search_url, headers=headers) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        
+                        # Find player link which contains the ID
+                        player_link = soup.find('a', href=lambda x: x and '/nba/player/_/id/' in x)
+                        if player_link:
+                            player_id = player_link['href'].split('/id/')[1].split('/')[0]
+                            return player_id
+            return None
+        except Exception as e:
+            logger.error(f"Error finding ESPN ID for {player_name}: {str(e)}")
+            return None
+
+    async def get_player_news(self, player_name: str) -> List[str]:
+        """Get the latest news about an NBA player from ESPN."""
+        try:
+            # First try to find the exact player name from our rankings
+            players = await self._get_players()
+            match = self._find_player_match(player_name, players)
+            if match:
+                player_name = match[0]  # Use the exact name from rankings
+            
+            # Look up player ID in our mapping
+            player_id = None
+            for known_name, espn_id in self.ESPN_PLAYER_IDS.items():
+                if player_name.lower() in known_name.lower() or known_name.lower() in player_name.lower():
+                    player_id = espn_id
+                    player_name = known_name  # Use the exact name from our mapping
+                    break
+            
+            if not player_id:
+                return [f"Sorry, I don't have the ESPN ID for {player_name} in my database yet. Please try another player."]
+            
+            # Scrape ESPN player page
+            url = f"https://www.espn.com/nba/player/_/id/{player_id}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status != 200:
+                        return [f"Error accessing ESPN page for {player_name}"]
+                    
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    # Find the Fantasy Overview section which contains news
+                    fantasy_news = soup.find('div', class_='FantasyOverview__News')
+                    if fantasy_news:
+                        # Get the News section
+                        news_p = fantasy_news.find('p', class_='nws')
+                        news_time = news_p.find('span', class_='FantasyNews__relDate') if news_p else None
+                        news_content = news_p.find('span', class_='FantasyNews__content') if news_p else None
+                        
+                        # Get the Spin section
+                        spin_p = fantasy_news.find('p', class_='spn')
+                        spin_content = spin_p.find('span') if spin_p else None
+                        
+                        if news_content or spin_content:
+                            response = [f"📰 Latest {player_name} Update 📰"]
+                            
+                            if news_time and news_content:
+                                response.append(f"News ({news_time.text}): {news_content.text}")
+                            
+                            if spin_content:
+                                response.append(f"\nSpin: {spin_content.text}")
+                            
+                            return ["\n".join(response)]
+                    
+                    return [f"No recent news found for {player_name} on ESPN"]
+                
+        except Exception as e:
+            logger.error(f"Error getting news for {player_name}: {str(e)}")
+            return [f"Error retrieving news for {player_name}. Please try again later."]

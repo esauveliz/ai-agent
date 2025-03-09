@@ -132,5 +132,17 @@ async def myteam(ctx):
         await ctx.send(response)
 
 
+@bot.command(name="news", help="Get the latest news about an NBA player. Usage: !news player_name")
+async def news(ctx, player_name: str, *, rest: str = ""):
+    """Get recent news and updates about an NBA player."""
+    # Combine player name if it was split across arguments
+    full_player_name = f"{player_name} {rest}".strip()
+    
+    logger.info(f"Fetching news for player: {full_player_name}")
+    responses = await agent.get_player_news(full_player_name)
+    for response in responses:
+        await ctx.send(response)
+
+
 # Start the bot, connecting it to the gateway
 bot.run(token)
