@@ -112,7 +112,7 @@ class MistralAgent:
         self.client = Mistral(api_key=MISTRAL_API_KEY)
         self.channel_history: Dict[int, List[dict]] = defaultdict(list)
         self.draft_states: Dict[int, DraftState] = {}
-        self.cached_players: List[str] = []  # Cache for player rankings
+        self.cached_players: Dict[str, Dict[str, str]] = {}  # Map of player name to their attributes
         self.last_fetch_time = 0  # Track when we last fetched players
         self.ESPN_PLAYER_IDS = {
             # Stars and popular players
@@ -168,12 +168,18 @@ class MistralAgent:
 
         return response_content
 
-    def _find_player_match(self, search_name: str, players_list: List[Tuple[str, Dict[str, str]]]) -> Optional[Tuple[str, Dict[str, str]]]:
-        """Find the best match for a player name in the players list."""
-        # Handle names without spaces (e.g., "JimmyButler" -> "Jimmy Butler")
+    def _find_player_match(self, search_name: str, players_map: Dict[str, Dict[str, str]]) -> Optional[Tuple[str, Dict[str, str]]]:
+        """Find the best match for a player name in the players map."""
+        def normalize_name(name: str) -> str:
+            """Normalize a name by removing special characters and converting to lowercase"""
+            # Remove periods, apostrophes, and other special characters
+            name = ''.join(c for c in name if c.isalnum() or c.isspace())
+            return name.lower().strip()
+        
         def split_name(name: str) -> str:
-            # Common prefixes to handle (e.g., "Mc", "Mac", etc.)
-            prefixes = ["Mc", "Mac", "De", "Van", "Von"]
+            """Split a name that might be camelCase or PascalCase"""
+            # Common prefixes to handle
+            prefixes = ["Mc", "Mac", "De", "Van", "Von", "St", "O", "Le", "La", "Al"]
             
             # First try to split on capital letters
             parts = []
@@ -182,7 +188,7 @@ class MistralAgent:
                 if i > 0 and char.isupper():
                     # Check if it's part of a prefix
                     current_word = "".join(current)
-                    next_chars = name[i:i+3] if i+3 <= len(name) else name[i:]  # Look ahead
+                    next_chars = name[i:i+3] if i+3 <= len(name) else name[i:]
                     is_prefix = False
                     for prefix in prefixes:
                         if (current_word + next_chars).startswith(prefix):
@@ -201,17 +207,19 @@ class MistralAgent:
         search_name = search_name.strip()
         if " " not in search_name:
             search_name = split_name(search_name)
-        search_parts = search_name.lower().split()
+        normalized_search = normalize_name(search_name)
+        search_parts = normalized_search.split()
         
-        # First try exact match
-        for player_name, stats in players_list:
-            if player_name.lower() == search_name.lower():
+        # Try exact match first
+        for player_name, stats in players_map.items():
+            if normalize_name(player_name) == normalized_search:
                 return (player_name, stats)
         
-        # Then try first+last name match
+        # Try matching first and last name
         if len(search_parts) > 1:
-            for player_name, stats in players_list:
-                player_parts = player_name.lower().split()
+            for player_name, stats in players_map.items():
+                normalized_player = normalize_name(player_name)
+                player_parts = normalized_player.split()
                 if len(player_parts) > 1:
                     # Match both first and last name
                     if (search_parts[0] in player_parts[0] and 
@@ -220,17 +228,36 @@ class MistralAgent:
         
         # Try matching without spaces
         no_space_search = "".join(search_parts)
-        for player_name, stats in players_list:
-            no_space_player = "".join(player_name.lower().split())
+        for player_name, stats in players_map.items():
+            no_space_player = "".join(normalize_name(player_name).split())
             if no_space_search in no_space_player:
                 return (player_name, stats)
         
-        # Finally try partial match on either first or last name
-        for player_name, stats in players_list:
-            player_parts = player_name.lower().split()
-            if any(part in player_parts for part in search_parts):
-                return (player_name, stats)
+        # Try partial matches with score-based ranking
+        best_match = None
+        best_score = 0
+        for player_name, stats in players_map.items():
+            normalized_player = normalize_name(player_name)
+            player_parts = normalized_player.split()
+            
+            # Calculate match score
+            score = 0
+            for search_part in search_parts:
+                # Full word match
+                if search_part in player_parts:
+                    score += 3
+                # Partial word match
+                elif any(search_part in part for part in player_parts):
+                    score += 1
+                    
+            if score > best_score:
+                best_score = score
+                best_match = (player_name, stats)
         
+        # Only return partial matches if they have a minimum score
+        if best_score >= 2:
+            return best_match
+            
         return None
 
     async def compare_players(self, players: List[str]) -> str:
@@ -345,14 +372,14 @@ class MistralAgent:
 
         return response_content
 
-    async def _get_players(self, force_refresh: bool = False) -> List[Tuple[str, Dict[str, str]]]:
+    async def _get_players(self, force_refresh: bool = False) -> Dict[str, Dict[str, str]]:
         """Get players from cache if available and fresh, otherwise fetch new data.
         
         Args:
             force_refresh: If True, bypass cache and fetch fresh data
             
         Returns:
-            List of tuples containing (player_name, stats_dict)
+            Dict mapping player names to their attributes
         """
         current_time = int(time.time())
         
@@ -372,8 +399,12 @@ class MistralAgent:
             
         return players
 
-    async def fetch_players_list(self) -> List[Tuple[str, Dict[str, str]]]:
-        """Fetch current NBA players list from hashtagbasketball.com"""
+    async def fetch_players_list(self) -> Dict[str, Dict[str, str]]:
+        """Fetch current NBA players list from hashtagbasketball.com
+        
+        Returns:
+            Dict mapping player names to their attributes
+        """
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -382,7 +413,7 @@ class MistralAgent:
         }
         
         try:
-            players = []
+            players_map = {}
             url = "https://hashtagbasketball.com/fantasy-basketball-rankings"
             
             logger.info("Starting to fetch top 215 players from hashtagbasketball.com")
@@ -391,7 +422,7 @@ class MistralAgent:
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
                         logger.error(f"Failed to fetch players: {response.status}")
-                        return []
+                        return {}
                     
                     logger.info("Successfully got response from server")
                     html = await response.text()
@@ -402,13 +433,13 @@ class MistralAgent:
                     
                     if not rankings_table:
                         logger.warning("Could not find rankings table")
-                        return []
+                        return {}
                     
                     # Get headers
                     header_row = rankings_table.find('tr')
                     if not header_row:
                         logger.warning("Could not find table headers")
-                        return []
+                        return {}
                     
                     headers = [th.get_text(strip=True) for th in header_row.find_all('th')]
                     
@@ -416,7 +447,7 @@ class MistralAgent:
                     rows = rankings_table.find_all('tr')[1:]  # Skip header row
                     if not rows:
                         logger.warning("No player rows found in rankings table")
-                        return []
+                        return {}
                     
                     # Extract player data from table rows
                     for row in rows:
@@ -424,29 +455,29 @@ class MistralAgent:
                         if len(cells) >= 2:  # Make sure we have enough cells
                             player_name = cells[1].get_text(strip=True)  # Player name is in second column
                             if player_name and player_name != "PLAYER":  # Skip entries that are just "PLAYER"
-                                # Create dictionary of all stats
+                                # Create dictionary of all stats for this player
                                 stats = {}
                                 for i, cell in enumerate(cells):
                                     if i < len(headers):  # Make sure we have a header for this column
                                         stats[headers[i]] = cell.get_text(strip=True)
-                                players.append((player_name, stats))
+                                players_map[player_name] = stats
                     
-                    if not players:
+                    if not players_map:
                         logger.warning("No players found in rankings")
-                        return []
+                        return {}
                     
-                    initial_count = len(players)
+                    initial_count = len(players_map)
                     # Filter out any remaining "PLAYER" entries
-                    players = [p for p in players if p[0] != "PLAYER"]
-                    if len(players) != initial_count:
-                        logger.info(f"Removed {initial_count - len(players)} invalid player entries")
+                    players_map = {name: stats for name, stats in players_map.items() if name != "PLAYER"}
+                    if len(players_map) != initial_count:
+                        logger.info(f"Removed {initial_count - len(players_map)} invalid player entries")
                     
-                    logger.info(f"Successfully fetched {len(players)} players from hashtagbasketball.com")
-                    return players  # Keep original order as it's already ranked by fantasy value
+                    logger.info(f"Successfully fetched {len(players_map)} players from hashtagbasketball.com")
+                    return players_map
                     
         except Exception as e:
             logger.error(f"Error fetching players from hashtagbasketball.com: {str(e)}")
-            return []
+            return {}
 
     async def start_draft(self, channel_id: int, total_rounds: int, pick_position: int, total_players: int) -> str:
         """Initialize a new draft session"""
@@ -459,7 +490,7 @@ class MistralAgent:
         try:
             # Fetch initial player list
             players_with_stats = await self._get_players()
-            draft_state.available_players = [player[0] for player in players_with_stats]
+            draft_state.available_players = [player[0] for player in players_with_stats.items()]
             
             if not draft_state.available_players:
                 return "Error: Could not fetch player list. Please try again later."
@@ -475,13 +506,21 @@ Draft Settings:
 • Position: Pick {pick_position} of {total_players}
 • Length: {total_rounds} rounds
 • Total Picks: {total_rounds * total_players}
-• Players Available: {len(draft_state.available_players)}
 
 Available Commands:
-• !pick <pick_number> <player_name> - Record which player was picked at each draft position
-• !myturn - Get recommendations for your pick
+• !pick <pick_number> <player_name> <position> - When it's your turn, you MUST specify a position to assign the player to your lineup
+• !pick <pick_number> <player_name> [position] - For other picks, position is optional
+• !getrec - Get draft recommendations based on current draft state
 • !myteam - View your current roster
 • !players - View available players
+
+Valid positions for your picks:
+• PG - Point Guard
+• SG - Shooting Guard
+• SF - Small Forward
+• PF - Power Forward
+• C - Center
+• UTIL - Utility
 
 Your pick will come up every {total_players} picks. Good luck! 🎯"""
             
@@ -489,7 +528,7 @@ Your pick will come up every {total_players} picks. Good luck! 🎯"""
             logger.error(f"Error starting draft: {str(e)}")
             return f"Error starting draft: {str(e)}\nPlease try again or contact support if the issue persists."
 
-    async def update_draft_pick(self, channel_id: int, pick_number: str, *player_name_parts: str) -> str:
+    async def update_draft_pick(self, channel_id: int, pick_num: int, player_name: str, position: Optional[str] = None) -> str:
         """Update draft state with a new pick"""
         if channel_id not in self.draft_states or not self.draft_states[channel_id].is_active:
             return "No active draft in this channel!"
@@ -497,73 +536,88 @@ Your pick will come up every {total_players} picks. Good luck! 🎯"""
         draft_state = self.draft_states[channel_id]
         
         try:
-            # Convert pick number to integer and validate
-            pick_num = int(pick_number)
             if pick_num < 1:
                 return "Pick number must be positive!"
             
-            # Join the player name parts
-            player_search = " ".join(player_name_parts).lower()
-            if not player_search:
+            if not player_name:
                 return "Please provide a player name!"
+            
+            # Calculate if this pick corresponds to the user's position
+            is_user_pick = pick_num == draft_state.pick_position
+            
+            # If it's user's pick, require position
+            if is_user_pick and not position:
+                return "Please specify a position for your pick (PG/SG/SF/PF/C/UTIL)."
+            
+            # Convert position string to enum if provided
+            pos_enum = None
+            if position:
+                try:
+                    pos_enum = Position[position]
+                except KeyError:
+                    return f"Invalid position '{position}'. Please use: PG, SG, SF, PF, C, or UTIL"
             
             # Find the best matching player in available players
             best_match = None
             for player in draft_state.available_players:
-                if player_search in player.lower():
+                if player_name.lower() in player.lower():
                     if best_match is None or len(player) < len(best_match):
                         best_match = player
                 # Also check first/last name exact matches
                 player_parts = player.lower().split()
-                if player_search in player_parts:
+                if player_name.lower() in player_parts:
                     best_match = player
                     break
             
+            # If no match found, use the provided name as is
             if not best_match:
-                return f"Could not find player '{player_search}' in available players. Use !players to see the list of available players."
+                logger.info(f"Player '{player_name}' not found in available players list, using name as provided")
+                best_match = player_name.title()  # Convert to title case for consistency
+            else:
+                # Remove the player from available players only if they were in our list
+                draft_state.available_players.remove(best_match)
             
-            # Remove the player from available players
-            draft_state.available_players.remove(best_match)
-            
-            # Record the pick
+            # Record the pick and update round
             draft_state.picks_made += 1
-            
-            # Calculate if this pick corresponds to the user's position
-            current_round = (draft_state.picks_made - 1) // draft_state.total_players + 1
-            pick_in_round = ((draft_state.picks_made - 1) % draft_state.total_players) + 1
-            is_user_pick = pick_in_round == draft_state.pick_position
+            # Calculate current round (1-based)
+            draft_state.current_round = ((draft_state.picks_made - 1) // draft_state.total_players) + 1
             
             # Add to drafted players and user's team if it's their pick
-            draft_state.drafted_players.append((best_match, None))
+            draft_state.drafted_players.append((best_match, pos_enum))
             if is_user_pick:
-                draft_state.my_team.append((best_match, None))
-            
-            # Update round if necessary
-            draft_state.current_round = current_round
+                draft_state.my_team.append((best_match, pos_enum))
             
             # Check if draft is complete
             if draft_state.picks_made >= (draft_state.total_players * draft_state.total_rounds):
                 draft_state.is_active = False
                 return "🎉 Draft Complete! 🎉"
             
-            # If it's our pick, add to my team
+            # If it's the next user's turn
             if draft_state.is_user_turn():
-                picks_until_next = draft_state.total_players - (draft_state.picks_made % draft_state.total_players)
-                
-                return f"""✅ Pick #{pick_num}: {best_match}
+                return f"""✅ Pick #{pick_num}: {best_match}{f" ({position})" if position else ""}
 
 Draft Status:
 • Round: {draft_state.current_round}/{draft_state.total_rounds}
-• Pick: {(draft_state.picks_made % draft_state.total_players) + 1}/{draft_state.total_players}
-• Players Remaining: {len(draft_state.available_players)}
-• Picks until your next turn: {picks_until_next}"""
+• Pick: {pick_num}/{draft_state.total_players}
+
+🎯 It's your turn to draft! Use !getrec for recommendations.
+
+To make your pick, use:
+!pick <pick_number> <player_name> <position>
+
+Available positions:
+• PG - Point Guard
+• SG - Shooting Guard
+• SF - Small Forward
+• PF - Power Forward
+• C - Center
+• UTIL - Utility"""
             
-            return f"""✅ Pick #{pick_num}: {best_match}
+            return f"""✅ Pick #{pick_num}: {best_match}{f" ({position})" if position else ""}
 
 Draft Status:
 • Round: {draft_state.current_round}/{draft_state.total_rounds}
-• Pick: {(draft_state.picks_made % draft_state.total_players) + 1}/{draft_state.total_players}
-• Players Remaining: {len(draft_state.available_players)}"""
+• Pick: {pick_num}/{draft_state.total_players}"""
             
         except ValueError:
             return "Invalid pick number! Please provide a valid number."
@@ -598,13 +652,19 @@ Draft Status:
         return responses
 
     async def get_draft_recommendation(self, channel_id: int) -> List[str]:
-        """Get draft recommendation when it's user's turn"""
+        """Get draft recommendations based on draft position and current state"""
         if channel_id not in self.draft_states or not self.draft_states[channel_id].is_active:
             return ["No active draft in this channel!"]
         
         draft_state = self.draft_states[channel_id]
-        if not draft_state.is_user_turn():
-            return ["It's not your turn to draft!"]
+        
+        # Calculate picks until next turn
+        current_pick = (draft_state.picks_made % draft_state.total_players) + 1
+        picks_until_turn = 0
+        if current_pick <= draft_state.pick_position:
+            picks_until_turn = draft_state.pick_position - current_pick
+        else:
+            picks_until_turn = (draft_state.total_players - current_pick) + draft_state.pick_position
         
         # Get roster needs
         needs = draft_state.get_roster_needs()
@@ -618,32 +678,43 @@ Draft Status:
         
         # Use web search to get current information about top available players
         search_term = f"{available_players_str} NBA fantasy basketball rankings current stats injuries 2024"
-        explanation = f"Getting current information about top available players: {available_players_str}"
-        web_search_result = "<function_calls>\n<invoke name=\"web_search\">\n<parameter name=\"search_term\">" + search_term + "</parameter>\n<parameter name=\"explanation\">" + explanation + "</parameter>\n</invoke>\n</function_calls>"
-
+        web_search_result = await self.web_search(search_term)
+        
+        # Draft position context
+        picks_context = ""
+        if draft_state.is_user_turn():
+            picks_context = "🎯 It's currently your turn to draft!"
+        else:
+            picks_context = f"You pick in {picks_until_turn} picks"
+        
         messages = [
             {"role": "system", "content": f"""You are a fantasy basketball draft expert. Consider:
 1. Current round: {draft_state.current_round}/{draft_state.total_rounds}
-2. Draft position: {draft_state.pick_position}/{draft_state.total_players}
-3. My team so far: {', '.join([f"{player}" for player, _ in draft_state.my_team])}
-4. Roster needs:
+2. Draft position: Pick {draft_state.pick_position} of {draft_state.total_players}
+3. Current pick in round: {current_pick}/{draft_state.total_players}
+4. Picks until your turn: {picks_until_turn}
+5. My team so far: {', '.join([f"{player}" for player, _ in draft_state.my_team])}
+6. Roster needs:
 {needs_str}
 
 Current player information:
 {web_search_result}
 
-Provide draft recommendations in this format:
-1. Draft Strategy Summary: 2-3 sentences about what to prioritize based on draft position, round, and team needs
-2. Top 5 Available Players: List 5 best available players with 1-line explanation for each
-3. Final Recommendation: State best pick and second-best pick with brief reasoning
+Provide draft recommendations in strictly in the following format:
+1. Draft Position Analysis: 2-3 sentences about the current draft state and picks until your turn
+2. Draft Strategy: 2-3 sentences about what to prioritize based on draft position, current pick, and team needs
+3. Top Available Players: List 5 best available players with 1-line explanation for each
+4. Recommendations:
+   - If it's your turn: State best pick and second-best pick with brief reasoning
+   - If not your turn: List 2-3 players you hope will still be available at your pick
 
 Focus on:
+- Draft position strategy (who might be available at your pick)
 - Team needs and roster construction
-- Current fantasy value and projections
 - Position scarcity
 - Injury status and availability
 - Recent performance and trends"""},
-            {"role": "user", "content": f"Who should I draft from these available players: {available_players_str}?"}
+            {"role": "user", "content": f"Analyze the draft situation and recommend players considering {picks_context}. Available players include: {available_players_str}"}
         ]
 
         response = await self.client.chat.complete_async(
@@ -652,6 +723,8 @@ Focus on:
         )
 
         full_response = f"""Draft Analysis:
+{picks_context}
+
 {needs_str}
 {response.choices[0].message.content}"""
         return self._split_into_messages(full_response)
@@ -659,15 +732,18 @@ Focus on:
     async def web_search(self, query: str) -> str:
         """Perform a web search using the web_search tool."""
         try:
-            # Make the actual web search call
-            search_results = await self.client.chat.complete_async(
+            # Use the web_search tool
+            search_result = await self.client.chat.complete_async(
                 model=MISTRAL_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a sports news assistant. Search the web for the latest NBA news and provide only factual, recent information. Focus on news from the last 24-48 hours."},
-                    {"role": "user", "content": f"Search for: {query}"}
-                ]
+                messages=[{
+                    "role": "system", 
+                    "content": "You are searching for current NBA player information. Return only factual, relevant information."
+                }, {
+                    "role": "user",
+                    "content": query
+                }]
             )
-            return search_results.choices[0].message.content
+            return search_result.choices[0].message.content
         except Exception as e:
             logger.error(f"Error in web search for query '{query}': {str(e)}")
             return f"Error performing web search: {str(e)}"
@@ -677,7 +753,9 @@ Focus on:
         # If we have a draft in this channel, show available players from draft state
         if channel_id in self.draft_states and self.draft_states[channel_id].is_active:
             # For draft mode, we only show names since we store only names in draft state
-            players = [(p, {}) for p in self.draft_states[channel_id].available_players]
+            draft_state = self.draft_states[channel_id]
+            all_players = await self._get_players()
+            players = {name: all_players.get(name, {}) for name in draft_state.available_players}
             prefix = "Available Players in Draft"
         else:
             # Get players from cache or fetch fresh data
@@ -690,33 +768,51 @@ Focus on:
         # Build the full content first
         content = []
         
-        # If we have stats, create a formatted table
-        if players[0][1]:  # If we have stats for the first player
-            # Get column widths
-            columns = list(players[0][1].keys())
-            # Remove unwanted columns
-            columns_to_exclude = {'GP', 'MPG', 'FT%', '3PM'}
-            filtered_columns = [col for col in columns if col not in columns_to_exclude]
+        # If we have stats for players, create a formatted table
+        first_player_stats = next(iter(players.values()))
+        if first_player_stats:  # If we have stats
+            # Most important columns for fantasy basketball
+            essential_columns = [
+                'R#',        # Rank
+                'PLAYER',    # Player Name
+                'TEAM',      # Team
+                'POS',       # Position
+                'PTS',       # Points
+                'REB',       # Rebounds
+                'AST',       # Assists
+                'STL',       # Steals
+                'BLK',       # Blocks
+                'TO',        # Turnovers
+                'FG%',       # Field Goal %
+                '3PM',       # Three Pointers Made
+                'FT%'        # Free Throw %
+            ]
             
+            # Filter columns that exist in our data
+            filtered_columns = [col for col in essential_columns if col in first_player_stats]
+            
+            # Define column widths
             col_widths = {
-                'rank': 4,  # Width for rank number
-                'name': max(max(len(p[0]) for p in players), len("Name")) + 2,  # Width for player names
+                'rank': 4,   # Width for rank number (increased to accommodate the period)
+                'name': max(max(len(name) for name in players.keys()), len("PLAYER")) + 1,  # Width for player names
             }
             
             # Calculate width for each stat column
-            for col in filtered_columns[2:]:  # Skip rank and name columns
-                col_widths[col] = max(
-                    max(len(p[1].get(col, '')) for p in players),  # Max width of values
-                    len(col)  # Width of header
-                ) + 2  # Add padding
+            for col in filtered_columns:
+                if col not in ['R#', 'PLAYER']:  # Skip rank and player name as they're handled separately
+                    col_widths[col] = max(
+                        max(len(str(stats.get(col, ''))) for stats in players.values()),  # Max width of values
+                        len(col)  # Width of header
+                    ) + 1  # Add minimal padding
             
             # Create header line
-            header_line = f"{'#':>{col_widths['rank']}} {'Name':<{col_widths['name']}}"
-            for col in filtered_columns[2:]:  # Skip rank and name columns
-                header_line += f" {col:^{col_widths[col]}}"
+            header_line = f"{'#':>{col_widths['rank']}} {'PLAYER':<{col_widths['name']}}"
+            for col in filtered_columns:
+                if col not in ['R#', 'PLAYER']:
+                    header_line += f" {col:^{col_widths[col]}}"
             
             # Create separator line
-            separator = "=" * len(header_line)
+            separator = "-" * len(header_line)
             
             # Add header to content
             content.append(f"{prefix} (top {len(players)}):\n")
@@ -724,16 +820,22 @@ Focus on:
             content.append(separator)
             
             # Add player rows
-            for i, (player_name, stats) in enumerate(players, 1):
-                player_line = f"{i:>{col_widths['rank']}} {player_name:<{col_widths['name']}}"
-                for col in filtered_columns[2:]:  # Skip rank and name columns
-                    value = stats.get(col, '')
-                    player_line += f" {value:^{col_widths[col]}}"
+            sorted_players = sorted(players.items(), key=lambda x: int(x[1].get('R#', '999')))
+            for i, (player_name, stats) in enumerate(sorted_players, 1):
+                player_line = f"{i:>2}. {player_name:<{col_widths['name']}}"  # Added period after rank
+                for col in filtered_columns:
+                    if col not in ['R#', 'PLAYER']:
+                        value = stats.get(col, '')
+                        # Right-align numeric columns, center-align others
+                        if col in ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TO', '3PM']:
+                            player_line += f" {value:>{col_widths[col]}}"
+                        else:
+                            player_line += f" {value:^{col_widths[col]}}"
                 content.append(player_line)
         else:
             # Simple numbered list for draft mode
             content.append(f"{prefix} (top {len(players)}):\n")
-            for i, (player_name, _) in enumerate(players, 1):
+            for i, player_name in enumerate(players.keys(), 1):
                 content.append(f"{i:>3}. {player_name}")
         
         # Join all content with newlines and split into messages
@@ -753,7 +855,6 @@ Focus on:
             
         # Get the latest player stats
         all_players = await self._get_players()
-        player_stats = {p[0]: p[1] for p in all_players}
         
         content = []
         content.append("🏀 Your Current Team 🏀\n")
@@ -769,10 +870,12 @@ Focus on:
             if players:
                 content.append(f"{position.value}:")
                 for player in players:
-                    stats = player_stats.get(player, {})
-                    if stats:
-                        # Show key stats if available
-                        content.append(f"  • {player} - {stats.get('Team', 'N/A')} ({stats.get('Pos', 'N/A')})")
+                    # Use _find_player_match to get the correct player stats
+                    match = self._find_player_match(player, all_players)
+                    if match:
+                        player_name, stats = match
+                        # Use uppercase keys consistently
+                        content.append(f"  • {player_name} - {stats.get('TEAM', 'N/A')} ({stats.get('POS', 'N/A')})")
                     else:
                         content.append(f"  • {player}")
                 content.append("")
@@ -782,9 +885,12 @@ Focus on:
         if flex_players:
             content.append("Unassigned Players:")
             for player in flex_players:
-                stats = player_stats.get(player, {})
-                if stats:
-                    content.append(f"  • {player} - {stats.get('Team', 'N/A')} ({stats.get('Pos', 'N/A')})")
+                # Use _find_player_match to get the correct player stats
+                match = self._find_player_match(player, all_players)
+                if match:
+                    player_name, stats = match
+                    # Use uppercase keys consistently
+                    content.append(f"  • {player_name} - {stats.get('TEAM', 'N/A')} ({stats.get('POS', 'N/A')})")
                 else:
                     content.append(f"  • {player}")
             content.append("")

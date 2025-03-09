@@ -61,7 +61,15 @@ async def on_message(message: discord.Message):
 
 
 # Commands
-@bot.command(name="compare", help="Compare NBA players for fantasy basketball. Usage: !compare player1 player2 [player3 ...]")
+@bot.command(
+    name="compare",
+    help="""Compare NBA players for fantasy basketball.
+Arguments:
+• player1, player2, ... - Names of players to compare (minimum 2 players)
+
+Usage: !compare player1 player2 [player3 ...]
+Example: !compare "LeBron James" "Stephen Curry" "Kevin Durant\""""
+)
 async def compare(ctx, *players):
     """Compare NBA players for fantasy basketball purposes."""
     # Check if we have at least 2 players to compare
@@ -74,7 +82,16 @@ async def compare(ctx, *players):
     await ctx.send(response)
 
 
-@bot.command(name="draft", help="Start a fantasy basketball draft. Usage: !draft rounds pick_position total_picks")
+@bot.command(
+    name="draft",
+    help="""Start a fantasy basketball draft.
+Arguments:
+• rounds - Number of rounds in the draft (e.g. 13)
+• pick_position - Your position in the draft order (e.g. 1 for first pick)
+• total_picks - Total number of teams drafting (e.g. 12 for a 12-team league)
+
+Usage: !draft rounds pick_position total_picks"""
+)
 async def draft(ctx, rounds: int, pick_position: int, total_picks: int):
     """Start a fantasy basketball draft session."""
     if rounds < 1 or pick_position < 1 or total_picks < 2 or pick_position > total_picks:
@@ -88,24 +105,73 @@ async def draft(ctx, rounds: int, pick_position: int, total_picks: int):
     await ctx.send(response)
 
 
-@bot.command(name="pick", help="Record a draft pick. Usage: !pick player_name position")
-async def pick(ctx, player_name: str, position: str, *, rest: str = ""):
-    """Record a draft pick."""
+@bot.command(
+    name="pick",
+    help="""Record a draft pick.
+Arguments:
+• pick_number - The overall pick number in the draft (e.g. 1 for first pick)
+• player_name - Name of the player being drafted (e.g. "LeBron James" or "LeBron")
+• position - REQUIRED when it's your turn to draft. Must be one of: PG/SG/SF/PF/C/UTIL
+
+Usage when it's your turn:
+!pick <pick_number> <player_name> <position>
+
+Usage for other picks:
+!pick <pick_number> <player_name> [position]""",
+    
+)
+async def pick(ctx, pick_num: int, player_name: str, *args):
+    """Record a draft pick. Position (PG/SG/SF/PF/C/UTIL) is required when it's your turn to assign the player to your lineup."""
     # Check if draft exists and is active
     if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
         await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
         return
     
-    # Combine player name if it was split
-    full_player_name = f"{player_name} {rest}".strip()
+    draft_state = agent.draft_states[ctx.channel.id]
+    current_pick = (draft_state.picks_made % draft_state.total_players) + 1
     
-    response = await agent.update_draft_pick(ctx.channel.id, full_player_name, position)
+    # Combine all remaining args into player name and position
+    position = None
+    if args:
+        # If it's the user's pick, the last argument must be position
+        if current_pick == draft_state.pick_position:
+            position = args[-1].upper()
+            if position not in ["PG", "SG", "SF", "PF", "C", "UTIL"]:
+                await ctx.send("Invalid position! Please use: PG, SG, SF, PF, C, or UTIL")
+                return
+            player_name_parts = args[:-1]  # All but last argument is player name
+        else:
+            # For non-user picks, check if last arg is a valid position
+            last_arg = args[-1].upper()
+            if last_arg in ["PG", "SG", "SF", "PF", "C", "UTIL"]:
+                position = last_arg
+                player_name_parts = args[:-1]
+            else:
+                # All args are part of the player name
+                player_name_parts = args
+    else:
+        player_name_parts = []
+    
+    # Combine player name parts
+    full_player_name = f"{player_name} {' '.join(player_name_parts)}".strip()
+    
+    response = await agent.update_draft_pick(ctx.channel.id, pick_num, full_player_name, position)
     await ctx.send(response)
 
 
-@bot.command(name="myturn", help="Get draft recommendations when it's your turn")
-async def myturn(ctx):
-    """Get draft recommendations when it's your turn."""
+@bot.command(
+    name="getrec",
+    help="""Get draft recommendations based on your draft position and current state.
+Shows:
+• Draft position analysis
+• Draft strategy
+• Top available players
+• Best picks for your position
+
+Usage: !getrec"""
+)
+async def getrec(ctx):
+    """Get draft recommendations considering draft position and current state."""
     # Check if draft exists and is active
     if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
         await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
@@ -116,7 +182,14 @@ async def myturn(ctx):
         await ctx.send(response)
 
 
-@bot.command(name="players", help="Show the list of available NBA players ranked by fantasy value")
+@bot.command(
+    name="players",
+    help="""Show the list of available NBA players ranked by fantasy value.
+During draft: Shows only undrafted players
+Outside draft: Shows all NBA players with their stats
+
+Usage: !players"""
+)
 async def players(ctx):
     """Show the list of available NBA players."""
     responses = await agent.show_players(ctx.channel.id)
@@ -124,7 +197,16 @@ async def players(ctx):
         await ctx.send(response)
 
 
-@bot.command(name="myteam", help="Show your current team in the draft")
+@bot.command(
+    name="myteam",
+    help="""Show your current team in the draft.
+Displays:
+• Players grouped by position
+• Team stats and information
+• Draft status and progress
+
+Usage: !myteam"""
+)
 async def myteam(ctx):
     """Show your current team in the draft."""
     responses = await agent.show_my_team(ctx.channel.id)
