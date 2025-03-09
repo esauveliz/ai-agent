@@ -58,8 +58,9 @@ class DraftState:
         
     def is_user_turn(self) -> bool:
         """Check if it's the user's turn to draft"""
-        current_pick_in_round = (self.picks_made % self.total_players) + 1
-        return current_pick_in_round == self.pick_position
+        # Calculate the current pick in the round (1-based)
+        current_pick = (self.picks_made % self.total_players) + 1
+        return current_pick == self.pick_position
     
     def get_roster_needs(self) -> Dict[Position, int]:
         """Calculate roster needs based on typical fantasy basketball roster requirements"""
@@ -319,6 +320,33 @@ class MistralAgent:
 
         return response_content
 
+    async def _get_players(self, force_refresh: bool = False) -> List[Tuple[str, Dict[str, str]]]:
+        """Get players from cache if available and fresh, otherwise fetch new data.
+        
+        Args:
+            force_refresh: If True, bypass cache and fetch fresh data
+            
+        Returns:
+            List of tuples containing (player_name, stats_dict)
+        """
+        current_time = int(time.time())
+        
+        # Use cache if available and less than 1 hour old, unless force refresh is requested
+        if not force_refresh and self.cached_players and (current_time - self.last_fetch_time) <= 3600:
+            logger.info("Using cached player rankings")
+            return self.cached_players
+            
+        # Fetch fresh data
+        logger.info("Fetching fresh player rankings")
+        players = await self.fetch_players_list()
+        
+        # Update cache if fetch was successful
+        if players:
+            self.cached_players = players
+            self.last_fetch_time = current_time
+            
+        return players
+
     async def fetch_players_list(self) -> List[Tuple[str, Dict[str, str]]]:
         """Fetch current NBA players list from hashtagbasketball.com"""
         headers = {
@@ -405,7 +433,8 @@ class MistralAgent:
         
         try:
             # Fetch initial player list
-            draft_state.available_players = await self.fetch_players_list()
+            players_with_stats = await self._get_players()
+            draft_state.available_players = [player[0] for player in players_with_stats]
             
             if not draft_state.available_players:
                 return "Error: Could not fetch player list. Please try again later."
@@ -424,12 +453,10 @@ Draft Settings:
 • Players Available: {len(draft_state.available_players)}
 
 Available Commands:
-• !pick <player_name> <position> - Record a draft pick
+• !pick <pick_number> <player_name> - Record which player was picked at each draft position
 • !myturn - Get recommendations for your pick
 • !myteam - View your current roster
 • !players - View available players
-
-Valid Positions: PG, SG, SF, PF, C, G, F, UTIL
 
 Your pick will come up every {total_players} picks. Good luck! 🎯"""
             
@@ -437,64 +464,122 @@ Your pick will come up every {total_players} picks. Good luck! 🎯"""
             logger.error(f"Error starting draft: {str(e)}")
             return f"Error starting draft: {str(e)}\nPlease try again or contact support if the issue persists."
 
-    async def update_draft_pick(self, channel_id: int, drafted_player: str, position_str: str) -> str:
+    async def update_draft_pick(self, channel_id: int, pick_number: str, *player_name_parts: str) -> str:
         """Update draft state with a new pick"""
         if channel_id not in self.draft_states or not self.draft_states[channel_id].is_active:
             return "No active draft in this channel!"
         
-        try:
-            position = Position[position_str.upper()]
-        except KeyError:
-            return f"Invalid position! Please use one of: {', '.join([pos.name for pos in Position])}"
-        
         draft_state = self.draft_states[channel_id]
-        draft_state.update_draft(drafted_player, position)
         
-        if not draft_state.is_active:
-            # Generate draft summary when complete
-            my_team = draft_state.my_team
-            summary = "🎉 Draft Complete! 🎉\n\nYour Final Roster:\n"
-            for pos in Position:
-                players = [player for player, p_pos in my_team if p_pos == pos]
-                if players:
-                    summary += f"\n{pos.value}:"
-                    for player in players:
-                        summary += f"\n• {player}"
-            return summary
-        
-        # If it was our pick, show updated roster needs
-        if draft_state.is_user_turn():
-            needs = draft_state.get_roster_needs()
-            needs_str = "\nRoster Needs:"
-            for pos, count in needs.items():
-                if count > 0:
-                    needs_str += f"\n• {pos.value}: {count} needed"
+        try:
+            # Convert pick number to integer and validate
+            pick_num = int(pick_number)
+            if pick_num < 1:
+                return "Pick number must be positive!"
             
-            picks_until_next = draft_state.total_players - (draft_state.picks_made % draft_state.total_players)
+            # Join the player name parts
+            player_search = " ".join(player_name_parts).lower()
+            if not player_search:
+                return "Please provide a player name!"
             
-            return f"""✅ Pick Recorded: {drafted_player} ({position.value})
+            # Find the best matching player in available players
+            best_match = None
+            for player in draft_state.available_players:
+                if player_search in player.lower():
+                    if best_match is None or len(player) < len(best_match):
+                        best_match = player
+                # Also check first/last name exact matches
+                player_parts = player.lower().split()
+                if player_search in player_parts:
+                    best_match = player
+                    break
+            
+            if not best_match:
+                return f"Could not find player '{player_search}' in available players. Use !players to see the list of available players."
+            
+            # Remove the player from available players
+            draft_state.available_players.remove(best_match)
+            
+            # Record the pick
+            draft_state.picks_made += 1
+            
+            # Calculate if this pick corresponds to the user's position
+            current_round = (draft_state.picks_made - 1) // draft_state.total_players + 1
+            pick_in_round = ((draft_state.picks_made - 1) % draft_state.total_players) + 1
+            is_user_pick = pick_in_round == draft_state.pick_position
+            
+            # Add to drafted players and user's team if it's their pick
+            draft_state.drafted_players.append((best_match, None))
+            if is_user_pick:
+                draft_state.my_team.append((best_match, None))
+            
+            # Update round if necessary
+            draft_state.current_round = current_round
+            
+            # Check if draft is complete
+            if draft_state.picks_made >= (draft_state.total_players * draft_state.total_rounds):
+                draft_state.is_active = False
+                return "🎉 Draft Complete! 🎉"
+            
+            # If it's our pick, add to my team
+            if draft_state.is_user_turn():
+                picks_until_next = draft_state.total_players - (draft_state.picks_made % draft_state.total_players)
+                
+                return f"""✅ Pick #{pick_num}: {best_match}
 
 Draft Status:
 • Round: {draft_state.current_round}/{draft_state.total_rounds}
 • Pick: {(draft_state.picks_made % draft_state.total_players) + 1}/{draft_state.total_players}
 • Players Remaining: {len(draft_state.available_players)}
-• Picks until your next turn: {picks_until_next}{needs_str}"""
-        
-        return f"""✅ Pick Recorded: {drafted_player} ({position.value})
+• Picks until your next turn: {picks_until_next}"""
+            
+            return f"""✅ Pick #{pick_num}: {best_match}
 
 Draft Status:
 • Round: {draft_state.current_round}/{draft_state.total_rounds}
 • Pick: {(draft_state.picks_made % draft_state.total_players) + 1}/{draft_state.total_players}
 • Players Remaining: {len(draft_state.available_players)}"""
+            
+        except ValueError:
+            return "Invalid pick number! Please provide a valid number."
 
-    async def get_draft_recommendation(self, channel_id: int) -> str:
+    def _split_into_messages(self, content: str, chunk_size: int = 1900) -> List[str]:
+        """Split a long message into chunks that fit within Discord's message limit.
+        
+        Args:
+            content: The full message content to split
+            chunk_size: Maximum size of each chunk (default 1900 to leave room for Discord's limit of 2000)
+            
+        Returns:
+            List of message chunks
+        """
+        responses = []
+        current_chunk = ""
+        
+        for line in content.split('\n'):
+            # If adding this line would exceed Discord's limit, start a new chunk
+            if len(current_chunk) + len(line) + 1 > chunk_size:
+                responses.append(current_chunk)
+                current_chunk = line
+            else:
+                if current_chunk:
+                    current_chunk += '\n'
+                current_chunk += line
+        
+        # Add the last chunk if it's not empty
+        if current_chunk:
+            responses.append(current_chunk)
+            
+        return responses
+
+    async def get_draft_recommendation(self, channel_id: int) -> List[str]:
         """Get draft recommendation when it's user's turn"""
         if channel_id not in self.draft_states or not self.draft_states[channel_id].is_active:
-            return "No active draft in this channel!"
+            return ["No active draft in this channel!"]
         
         draft_state = self.draft_states[channel_id]
         if not draft_state.is_user_turn():
-            return "It's not your turn to draft!"
+            return ["It's not your turn to draft!"]
         
         # Get roster needs
         needs = draft_state.get_roster_needs()
@@ -506,16 +591,28 @@ Draft Status:
         # Get current information about available players
         available_players_str = ", ".join(draft_state.available_players[:10])
         
-        # Use web search to get current information
+        # Use web search to get current information about top available players
+        search_term = f"{available_players_str} NBA fantasy basketball rankings current stats injuries 2024"
+        explanation = f"Getting current information about top available players: {available_players_str}"
+        web_search_result = "<function_calls>\n<invoke name=\"web_search\">\n<parameter name=\"search_term\">" + search_term + "</parameter>\n<parameter name=\"explanation\">" + explanation + "</parameter>\n</invoke>\n</function_calls>"
+        
         messages = [
             {"role": "system", "content": f"""You are a fantasy basketball draft expert. Consider:
 1. Current round: {draft_state.current_round}/{draft_state.total_rounds}
 2. Draft position: {draft_state.pick_position}/{draft_state.total_players}
-3. My team so far: {', '.join([f"{player} ({pos.value})" for player, pos in draft_state.my_team])}
+3. My team so far: {', '.join([f"{player}" for player, _ in draft_state.my_team])}
 4. Roster needs:
 {needs_str}
 
-Recommend the best available player to draft based on:
+Current player information:
+{web_search_result}
+
+Provide draft recommendations in this format:
+1. Draft Strategy Summary: 2-3 sentences about what to prioritize based on draft position, round, and team needs
+2. Top 5 Available Players: List 5 best available players with 1-line explanation for each
+3. Final Recommendation: State best pick and second-best pick with brief reasoning
+
+Focus on:
 - Team needs and roster construction
 - Current fantasy value and projections
 - Position scarcity
@@ -529,7 +626,10 @@ Recommend the best available player to draft based on:
             messages=messages,
         )
         
-        return f"Draft Analysis:\n{needs_str}\n{response.choices[0].message.content}"
+        full_response = f"""Draft Analysis:
+{needs_str}
+{response.choices[0].message.content}"""
+        return self._split_into_messages(full_response)
 
     async def web_search(self, query: str) -> str:
         """Perform a web search using the web_search tool."""
@@ -541,27 +641,21 @@ Recommend the best available player to draft based on:
 
     async def show_players(self, channel_id: int) -> List[str]:
         """Show the list of available NBA players ranked by fantasy value"""
-        current_time = int(time.time())
-        
         # If we have a draft in this channel, show available players from draft state
         if channel_id in self.draft_states and self.draft_states[channel_id].is_active:
             # For draft mode, we only show names since we store only names in draft state
             players = [(p, {}) for p in self.draft_states[channel_id].available_players]
             prefix = "Available Players in Draft"
         else:
-            # Refresh cache if it's empty or older than 1 hour
-            if not self.cached_players or (current_time - self.last_fetch_time) > 3600:
-                self.cached_players = await self.fetch_players_list()
-                self.last_fetch_time = current_time
-            
-            players = self.cached_players
+            # Get players from cache or fetch fresh data
+            players = await self._get_players()
             prefix = "NBA Players Ranked by Fantasy Value"
             
         if not players:
             return ["Could not fetch player rankings. Please try again later."]
         
-        # Build the responses
-        responses = []
+        # Build the full content first
+        content = []
         
         # If we have stats, create a formatted table
         if players[0][1]:  # If we have stats for the first player
@@ -591,8 +685,10 @@ Recommend the best available player to draft based on:
             # Create separator line
             separator = "=" * len(header_line)
             
-            # Start first chunk with header
-            current_chunk = f"{prefix} (top {len(players)}):\n\n{header_line}\n{separator}\n"
+            # Add header to content
+            content.append(f"{prefix} (top {len(players)}):\n")
+            content.append(header_line)
+            content.append(separator)
             
             # Add player rows
             for i, (player_name, stats) in enumerate(players, 1):
@@ -600,29 +696,70 @@ Recommend the best available player to draft based on:
                 for col in filtered_columns[2:]:  # Skip rank and name columns
                     value = stats.get(col, '')
                     player_line += f" {value:^{col_widths[col]}}"
-                player_line += "\n"
-                
-                # If adding this line would exceed Discord's limit, start a new chunk
-                if len(current_chunk) + len(player_line) > 1900:
-                    responses.append(current_chunk)
-                    current_chunk = ""  # Start new chunk without header
-                
-                current_chunk += player_line
+                content.append(player_line)
         else:
             # Simple numbered list for draft mode
-            current_chunk = f"{prefix} (top {len(players)}):\n\n"
+            content.append(f"{prefix} (top {len(players)}):\n")
             for i, (player_name, _) in enumerate(players, 1):
-                player_line = f"{i:>3}. {player_name}\n"
-                
-                # If adding this line would exceed Discord's limit, start a new chunk
-                if len(current_chunk) + len(player_line) > 1900:
-                    responses.append(current_chunk)
-                    current_chunk = ""
-                
-                current_chunk += player_line
+                content.append(f"{i:>3}. {player_name}")
         
-        # Add the last chunk if it's not empty
-        if current_chunk:
-            responses.append(current_chunk)
+        # Join all content with newlines and split into messages
+        return self._split_into_messages('\n'.join(content))
+
+    async def show_my_team(self, channel_id: int) -> List[str]:
+        """Show the user's current team in the draft"""
+        if channel_id not in self.draft_states:
+            return ["No draft has been started in this channel. Use !draft to start a new draft."]
             
-        return responses
+        draft_state = self.draft_states[channel_id]
+        if not draft_state.is_active:
+            return ["The draft has ended. Start a new draft with !draft to build a new team."]
+            
+        if not draft_state.my_team:
+            return ["Your team is currently empty. Wait for your turn to draft or use !pick to record your picks."]
+            
+        # Get the latest player stats
+        all_players = await self._get_players()
+        player_stats = {p[0]: p[1] for p in all_players}
+        
+        content = []
+        content.append("🏀 Your Current Team 🏀\n")
+        
+        # Group players by position
+        players_by_position = defaultdict(list)
+        for player, position in draft_state.my_team:
+            players_by_position[position if position else "FLEX"].append(player)
+            
+        # Display team composition
+        for position in Position:
+            players = players_by_position.get(position, [])
+            if players:
+                content.append(f"{position.value}:")
+                for player in players:
+                    stats = player_stats.get(player, {})
+                    if stats:
+                        # Show key stats if available
+                        content.append(f"  • {player} - {stats.get('Team', 'N/A')} ({stats.get('Pos', 'N/A')})")
+                    else:
+                        content.append(f"  • {player}")
+                content.append("")
+        
+        # Show flex/unassigned players
+        flex_players = players_by_position.get("FLEX", [])
+        if flex_players:
+            content.append("Unassigned Players:")
+            for player in flex_players:
+                stats = player_stats.get(player, {})
+                if stats:
+                    content.append(f"  • {player} - {stats.get('Team', 'N/A')} ({stats.get('Pos', 'N/A')})")
+                else:
+                    content.append(f"  • {player}")
+            content.append("")
+        
+        # Add draft status
+        content.append(f"Draft Status:")
+        content.append(f"• Round: {draft_state.current_round}/{draft_state.total_rounds}")
+        content.append(f"• Your Position: Pick {draft_state.pick_position} of {draft_state.total_players}")
+        content.append(f"• Total Players Drafted: {len(draft_state.my_team)}")
+        
+        return self._split_into_messages('\n'.join(content))

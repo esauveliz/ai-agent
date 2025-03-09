@@ -111,8 +111,9 @@ async def myturn(ctx):
         await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
         return
         
-    response = await agent.get_draft_recommendation(ctx.channel.id)
-    await ctx.send(response)
+    responses = await agent.get_draft_recommendation(ctx.channel.id)
+    for response in responses:
+        await ctx.send(response)
 
 
 @bot.command(name="players", help="Show the list of available NBA players ranked by fantasy value")
@@ -123,15 +124,12 @@ async def players(ctx):
         await ctx.send(response)
 
 
-# This example command is here to show you how to add commands to the bot.
-# Run !ping with any number of arguments to see the command in action.
-# Feel free to delete this if your project will not need commands.
-@bot.command(name="ping", help="Pings the bot.")
-async def ping(ctx, *, arg=None):
-    if arg is None:
-        await ctx.send("Pong!")
-    else:
-        await ctx.send(f"Pong! Your argument was {arg}")
+@bot.command(name="myteam", help="Show your current team in the draft")
+async def myteam(ctx):
+    """Show your current team in the draft."""
+    responses = await agent.show_my_team(ctx.channel.id)
+    for response in responses:
+        await ctx.send(response)
 
 
 # Start the bot, connecting it to the gateway
