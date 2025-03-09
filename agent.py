@@ -142,24 +142,170 @@ class MistralAgent:
 
         return response_content
 
+    def _find_player_match(self, search_name: str, players_list: List[Tuple[str, Dict[str, str]]]) -> Optional[Tuple[str, Dict[str, str]]]:
+        """Find the best match for a player name in the players list."""
+        # Handle names without spaces (e.g., "JimmyButler" -> "Jimmy Butler")
+        def split_name(name: str) -> str:
+            # Common prefixes to handle (e.g., "Mc", "Mac", etc.)
+            prefixes = ["Mc", "Mac", "De", "Van", "Von"]
+            
+            # First try to split on capital letters
+            parts = []
+            current = []
+            for i, char in enumerate(name):
+                if i > 0 and char.isupper():
+                    # Check if it's part of a prefix
+                    current_word = "".join(current)
+                    next_chars = name[i:i+3] if i+3 <= len(name) else name[i:]  # Look ahead
+                    is_prefix = False
+                    for prefix in prefixes:
+                        if (current_word + next_chars).startswith(prefix):
+                            is_prefix = True
+                            break
+                    
+                    if not is_prefix:
+                        parts.append("".join(current))
+                        current = []
+                current.append(char)
+            parts.append("".join(current))
+            
+            return " ".join(parts)
+        
+        # Clean and prepare search name
+        search_name = search_name.strip()
+        if " " not in search_name:
+            search_name = split_name(search_name)
+        search_parts = search_name.lower().split()
+        
+        # First try exact match
+        for player_name, stats in players_list:
+            if player_name.lower() == search_name.lower():
+                return (player_name, stats)
+        
+        # Then try first+last name match
+        if len(search_parts) > 1:
+            for player_name, stats in players_list:
+                player_parts = player_name.lower().split()
+                if len(player_parts) > 1:
+                    # Match both first and last name
+                    if (search_parts[0] in player_parts[0] and 
+                        search_parts[-1] in player_parts[-1]):
+                        return (player_name, stats)
+        
+        # Try matching without spaces
+        no_space_search = "".join(search_parts)
+        for player_name, stats in players_list:
+            no_space_player = "".join(player_name.lower().split())
+            if no_space_search in no_space_player:
+                return (player_name, stats)
+        
+        # Finally try partial match on either first or last name
+        for player_name, stats in players_list:
+            player_parts = player_name.lower().split()
+            if any(part in player_parts for part in search_parts):
+                return (player_name, stats)
+        
+        return None
+
     async def compare_players(self, players: List[str]) -> str:
-        """Compare NBA players for fantasy basketball purposes without maintaining conversation history."""
-        # Format the players list for the prompt
+        """Compare NBA players for fantasy basketball purposes."""
+        if len(players) < 2:
+            return "Please provide at least 2 players to compare."
+            
         players_str = ", ".join(players)
         
-        # Get current information about all players in one search
-        search_term = f"{players_str} NBA injury status fantasy basketball current 2024"
-        explanation = f"Searching for current NBA information about these players: {players_str}"
+        # First get current rankings from HashtagBasketball
+        current_time = int(time.time())
+        if not self.cached_players or (current_time - self.last_fetch_time) > 3600:
+            self.cached_players = await self.fetch_players_list()
+            self.last_fetch_time = current_time
+            
+        # Get rankings for requested players with better name matching
+        player_rankings = {}
+        unmatched_players = []
+        for player in players:
+            match = self._find_player_match(player, self.cached_players)
+            if match:
+                player_name, stats = match
+                # Get numerical rank from stats
+                try:
+                    rank = int(stats.get('RANK', '999'))
+                except ValueError:
+                    rank = 999
+                player_rankings[player] = {
+                    "exact_name": player_name,
+                    "stats": stats,
+                    "rank": rank,
+                    "injury_status": "Unknown"  # Will be updated with real-time check
+                }
+            else:
+                unmatched_players.append(player)
         
-        # Use web_search tool to get current information
-        web_search_result = "<function_calls>\n<invoke name=\"web_search\">\n<parameter name=\"search_term\">" + search_term + "</parameter>\n<parameter name=\"explanation\">" + explanation + "</parameter>\n</invoke>\n</function_calls>"
+        # If any players weren't found in rankings, note this
+        if unmatched_players:
+            unmatched_str = ", ".join(unmatched_players)
+            logger.warning(f"Could not find rankings for players: {unmatched_str}")
+                
+        # Get current injury/news info for each player and update rankings
+        search_results = []
+        for player in players:
+            # First search specifically for season-ending injuries
+            season_ending_search = f"{player} NBA season ending injury 2024-25 out for season"
+            season_ending_result = await self.web_search(season_ending_search)
+            
+            # Then search for current injury status and news
+            injury_search = f"{player} NBA injury status March 2025 current"
+            injury_result = await self.web_search(injury_search)
+            
+            # Finally get recent performance
+            performance_search = f"{player} NBA fantasy basketball performance March 2025"
+            performance_result = await self.web_search(performance_search)
+            
+            # Combine with HashtagBasketball data if available
+            player_info = "Current Status:\n"
+            if player in player_rankings:
+                exact_name = player_rankings[player]["exact_name"]
+                stats = player_rankings[player]["stats"]
+                player_info += f"HashtagBasketball Rankings (as {exact_name}):\n"
+                for stat, value in stats.items():
+                    player_info += f"- {stat}: {value}\n"
+                
+                # Update player's injury status
+                if "season" in season_ending_result.lower() and "ending" in season_ending_result.lower():
+                    player_rankings[player]["injury_status"] = "Season-Ending"
+                    player_rankings[player]["rank"] = 9999  # Force to bottom
+                elif any(term in injury_result.lower() for term in ["out indefinitely", "out for", "expected to miss", "several weeks"]):
+                    player_rankings[player]["injury_status"] = "Long-Term"
+                    player_rankings[player]["rank"] += 50  # Significantly lower ranking
+                elif any(term in injury_result.lower() for term in ["day-to-day", "questionable", "probable"]):
+                    player_rankings[player]["injury_status"] = "Day-to-Day"
+                    # Keep original ranking mostly intact
+                else:
+                    player_rankings[player]["injury_status"] = "Healthy"
+            else:
+                player_info += "Not found in current HashtagBasketball rankings\n"
+            
+            player_info += f"\nSeason-Ending Injury Check:\n{season_ending_result}\n"
+            player_info += f"\nCurrent Injury Status:\n{injury_result}\n"
+            player_info += f"\nRecent Performance:\n{performance_result}"
+            
+            search_results.append(f"Information for {player}:\n{player_info}\n")
+        
+        # Sort players by adjusted rank (considering injuries)
+        sorted_players = sorted(
+            [(p, info) for p, info in player_rankings.items()],
+            key=lambda x: x[1]["rank"]
+        )
+        
+        # Create ranking summary
+        ranking_summary = "\nFinal Rankings (considering injuries):\n"
+        for i, (player, info) in enumerate(sorted_players, 1):
+            status = f" ({info['injury_status']})" if info['injury_status'] != "Healthy" else ""
+            ranking_summary += f"{i}. {info['exact_name']}{status}\n"
         
         messages = [
-            {"role": "system", "content": COMPARE_PROMPT.format(
-                players=players_str,
-                current_info=web_search_result
-            )},
-            {"role": "user", "content": f"Compare these players for fantasy basketball: {players_str}"}
+            {"role": "system", "content": SYSTEM_PROMPT + "\n\nIMPORTANT RULES:\n1. Season-ending injuries MUST be mentioned first and ranked last\n2. Long-term injuries (1+ month) should be ranked lower but not last\n3. Day-to-day injuries should be mentioned but not significantly affect ranking\n4. For healthy players, use HashtagBasketball rankings\n\nPlayer Information:\n" + "\n".join(search_results) + ranking_summary},
+            {"role": "user", "content": f"Compare these players for fantasy basketball value RIGHT NOW. Focus heavily on injury status - especially season-ending injuries like Joel Embiid's knee surgery. Explain why each player is ranked where they are, mentioning both their baseline value and any injury concerns: {players_str}"}
         ]
 
         response = await self.client.chat.complete_async(
@@ -167,7 +313,11 @@ class MistralAgent:
             messages=messages,
         )
 
-        return response.choices[0].message.content
+        response_content = response.choices[0].message.content
+        if len(response_content) > 1900:
+            response_content = response_content[:1900] + "..."
+
+        return response_content
 
     async def fetch_players_list(self) -> List[Tuple[str, Dict[str, str]]]:
         """Fetch current NBA players list from hashtagbasketball.com"""
@@ -380,6 +530,14 @@ Recommend the best available player to draft based on:
         )
         
         return f"Draft Analysis:\n{needs_str}\n{response.choices[0].message.content}"
+
+    async def web_search(self, query: str) -> str:
+        """Perform a web search using the web_search tool."""
+        try:
+            # Use the web_search tool directly
+            return f"<function_calls><invoke name=\"web_search\"><parameter name=\"search_term\">{query}</parameter><parameter name=\"explanation\">Getting current NBA player information</parameter></invoke></function_calls>"
+        except Exception as e:
+            return f"Error performing web search: {str(e)}"
 
     async def show_players(self, channel_id: int) -> List[str]:
         """Show the list of available NBA players ranked by fantasy value"""
