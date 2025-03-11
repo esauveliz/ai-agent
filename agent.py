@@ -27,11 +27,13 @@ Current information about the players:
 
 Players to compare: {players}
 
-Format your response as follows:
+Format your response as follows (keep it under 1900 characters):
 1. First mention if any names are invalid/inactive or if there aren't enough names
 2. If all names are valid, provide the ranking with explanations, heavily weighing current injuries and availability
 3. Keep explanations concise but informative, focusing on CURRENT situation and value
-4. If a player is currently injured, this MUST be mentioned first in their analysis"""
+4. If a player is currently injured, this MUST be mentioned first in their analysis
+5. Use bullet points for key points to save space
+6. Avoid unnecessary details and focus on the most important factors"""
 
 MAX_HISTORY = 10  # Maximum number of messages to keep in history per channel
 
@@ -737,8 +739,10 @@ class MistralAgent:
             ranking_summary += f"{i}. {info['exact_name']}{status}\n"
         
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\nIMPORTANT RULES:\n1. Season-ending injuries MUST be mentioned first and ranked last\n2. Long-term injuries (1+ month) should be ranked lower but not last\n3. Day-to-day injuries should be mentioned but not significantly affect ranking\n4. For healthy players, use HashtagBasketball rankings\n\nPlayer Information:\n" + "\n".join(search_results) + ranking_summary},
-            {"role": "user", "content": f"Compare these players for fantasy basketball value RIGHT NOW. Focus heavily on injury status - especially season-ending injuries like Joel Embiid's knee surgery. Explain why each player is ranked where they are, mentioning both their baseline value and any injury concerns: {players_str}"}
+            {"role": "system", "content": COMPARE_PROMPT.format(
+                current_info="\n".join(search_results) + ranking_summary,
+                players=players_str
+            )}
         ]
 
         response = await self.client.chat.complete_async(
@@ -746,11 +750,7 @@ class MistralAgent:
             messages=messages,
         )
 
-        response_content = response.choices[0].message.content
-        if len(response_content) > 1900:
-            response_content = response_content[:1900] + "..."
-
-        return response_content
+        return response.choices[0].message.content
 
     async def _get_players(self, force_refresh: bool = False) -> Dict[str, Dict[str, str]]:
         """Get players from cache if available and fresh, otherwise fetch new data.
@@ -1393,6 +1393,7 @@ Focus on:
             match = self._find_player_match(player_name, players)
             if match:
                 player_name = match[0]  # Use the exact name from rankings
+                player_stats = match[1]  # Get player stats
             
             # Look up player ID in our mapping
             player_id = None
@@ -1403,7 +1404,7 @@ Focus on:
                     break
             
             if not player_id:
-                return [f"Sorry, I don't have the ESPN ID for {player_name} in my database yet. Please try another player."]
+                return ["❌ Player Not Found: Could not find player in database. Please check the spelling and try again."]
             
             # Scrape ESPN player page
             url = f"https://www.espn.com/nba/player/_/id/{player_id}"
@@ -1414,36 +1415,83 @@ Focus on:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
-                        return [f"Error accessing ESPN page for {player_name}"]
+                        return [f"❌ Error: Could not access ESPN data for {player_name}"]
                     
                     html = await response.text()
                     soup = BeautifulSoup(html, 'html.parser')
                     
-                    # Find the Fantasy Overview section which contains news
-                    fantasy_news = soup.find('div', class_='FantasyOverview__News')
-                    if fantasy_news:
-                        # Get the News section
-                        news_p = fantasy_news.find('p', class_='nws')
-                        news_time = news_p.find('span', class_='FantasyNews__relDate') if news_p else None
-                        news_content = news_p.find('span', class_='FantasyNews__content') if news_p else None
-                        
-                        # Get the Spin section
-                        spin_p = fantasy_news.find('p', class_='spn')
-                        spin_content = spin_p.find('span') if spin_p else None
-                        
-                        if news_content or spin_content:
-                            response = [f"📰 Latest {player_name} Update 📰"]
-                            
-                            if news_time and news_content:
-                                response.append(f"News ({news_time.text}): {news_content.text}")
-                            
-                            if spin_content:
-                                response.append(f"\nSpin: {spin_content.text}")
-                            
-                            return ["\n".join(response)]
+                    # Get player info
+                    player_info = soup.find('div', class_='PlayerHeader__Main_Aside')
+                    team_info = player_info.find('a', class_='AnchorLink') if player_info else None
+                    current_team = team_info.text if team_info else "N/A"
                     
-                    return [f"No recent news found for {player_name} on ESPN"]
+                    # Find the Fantasy Overview section
+                    fantasy_news = soup.find('div', class_='FantasyOverview__News')
+                    if not fantasy_news:
+                        return [self._format_no_news_message(player_name, current_team, player_stats if match else None)]
+                    
+                    # Get the News section
+                    news_p = fantasy_news.find('p', class_='nws')
+                    news_time = news_p.find('span', class_='FantasyNews__relDate') if news_p else None
+                    news_content = news_p.find('span', class_='FantasyNews__content') if news_p else None
+                    
+                    # Get the Spin section
+                    spin_p = fantasy_news.find('p', class_='spn')
+                    spin_content = spin_p.find('span') if spin_p else None
+                    
+                    if news_content or spin_content:
+                        return [self._format_news_message(
+                            player_name=player_name,
+                            team=current_team,
+                            news_time=news_time.text if news_time else None,
+                            news_content=news_content.text.strip() if news_content else None,
+                            analysis=spin_content.text.strip() if spin_content else None,
+                            stats=player_stats if match else None
+                        )]
+                    
+                    return [self._format_no_news_message(player_name, current_team, player_stats if match else None)]
                 
         except Exception as e:
             logger.error(f"Error getting news for {player_name}: {str(e)}")
-            return [f"Error retrieving news for {player_name}. Please try again later."]
+            return [f"❌ Error: Could not retrieve news for {player_name}. Please try again later."]
+
+    def _format_news_message(self, player_name: str, team: str, news_time: Optional[str] = None,
+                           news_content: Optional[str] = None, analysis: Optional[str] = None,
+                           stats: Optional[Dict[str, str]] = None) -> str:
+        """Format the news message with consistent styling."""
+        sections = []
+        
+        # Header with player name and team
+        sections.append(f"{'='*50}")
+        sections.append(f"📊 {player_name} | {team}")
+        sections.append(f"{'='*50}")
+        
+        # Latest News Section
+        if news_time or news_content:
+            if news_time:
+                sections.append(f"\n🕒 {news_time}")
+            if news_content:
+                sections.append(f"{news_content}")
+        
+        # Analysis Section
+        if analysis:
+            sections.append(f"\n💭 ANALYSIS")
+            sections.append(f"{analysis}")
+        
+        # Join all sections and add block quote at the start
+        return ">>> " + "\n".join(sections)
+
+    def _format_no_news_message(self, player_name: str, team: str, stats: Optional[Dict[str, str]] = None) -> str:
+        """Format the message when no news is available."""
+        sections = []
+        
+        # Header
+        sections.append(f"{'='*50}")
+        sections.append(f"📊 {player_name} | {team}")
+        sections.append(f"{'='*50}")
+        
+        sections.append("\nℹ️ No recent news available for this player.")
+        sections.append(f"\n{'='*50}")
+        
+        # Join all sections and add block quote at the start
+        return ">>> " + "\n".join(sections)

@@ -10,13 +10,63 @@ PREFIX = "!"
 # Setup logging
 logger = logging.getLogger("discord")
 
+class CustomHelpCommand(commands.HelpCommand):
+    """Custom help command implementation"""
+    
+    async def send_bot_help(self, mapping):
+        """Override the main help command"""
+        embed = discord.Embed(
+            title="🏀 Fantasy Basketball Assistant Commands",
+            description="Here are all available commands:",
+            color=discord.Color.blue()
+        )
+        
+        # Add command fields to embed
+        embed.add_field(
+            name="📊 Draft Commands",
+            value="```!draft - Start a new draft session\n!pick - Record a draft pick\n!getrec - Get draft recommendations\n!myteam - View your team\n!players - Show available players```",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔍 Player Analysis",
+            value="```!compare - Compare multiple players\n!news - Get latest player updates```",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="ℹ️ Help",
+            value="Type `!help <command>` for detailed information about a specific command",
+            inline=False
+        )
+        
+        # Send the embed to the channel
+        await self.get_destination().send(embed=embed)
+    
+    async def send_command_help(self, command):
+        """Keep the detailed help for individual commands"""
+        embed = discord.Embed(
+            title=f"!{command.name}",
+            description=command.help or "No description available.",
+            color=discord.Color.blue()
+        )
+        
+        # Add usage field if command has usage info
+        if command.usage:
+            embed.add_field(name="Usage", value=f"```{command.usage}```", inline=False)
+            
+        await self.get_destination().send(embed=embed)
+
 # Load the environment variables
 load_dotenv()
 
-# Create the bot with all intents
-# The message content and members intent must be enabled in the Discord Developer Portal for the bot to work.
+# Create the bot with all intents and custom help command
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+bot = commands.Bot(
+    command_prefix=PREFIX,
+    intents=intents,
+    help_command=CustomHelpCommand()
+)
 
 # Import the Mistral agent from the agent.py file
 agent = MistralAgent()
@@ -41,34 +91,25 @@ async def on_ready():
 async def on_message(message: discord.Message):
     """
     Called when a message is sent in any channel the bot can see.
-
-    https://discordpy.readthedocs.io/en/latest/api.html#discord.on_message
+    Only processes command messages starting with the prefix.
     """
     # Don't delete this line! It's necessary for the bot to process commands.
     await bot.process_commands(message)
 
-    # Ignore messages from self or other bots to prevent infinite loops.
-    if message.author.bot or message.content.startswith("!"):
-        return
-
-    # Process the message with the agent you wrote
-    # Open up the agent.py file to customize the agent
-    logger.info(f"Processing message from {message.author}: {message.content}")
-    response = await agent.run(message)
-
-    # Send the response back to the channel
-    await message.reply(response)
+    # Ignore all other messages
+    return
 
 
 # Commands
 @bot.command(
     name="compare",
-    help="""Compare NBA players for fantasy basketball.
-Arguments:
-• player1, player2, ... - Names of players to compare (minimum 2 players)
-
-Usage: !compare player1 player2 [player3 ...]
-Example: !compare "LeBron James" "Stephen Curry" "Kevin Durant\""""
+    help="🔄 Compare NBA players for fantasy value\n\n"
+         "Description:\n"
+         "• Compare multiple players' stats and value\n"
+         "• Analyze current injuries and performance\n"
+         "• Get detailed rankings and comparisons\n\n"
+         "Usage: `!compare player1 player2 [player3 ...]`\n"
+         "Example: `!compare \"LeBron James\" \"Stephen Curry\"`"
 )
 async def compare(ctx, *players):
     """Compare NBA players for fantasy basketball purposes."""
@@ -85,13 +126,13 @@ async def compare(ctx, *players):
 
 @bot.command(
     name="draft",
-    help="""Start a fantasy basketball draft.
-Arguments:
-• rounds - Number of rounds in the draft (e.g. 13)
-• pick_position - Your position in the draft order (e.g. 1 for first pick)
-• total_picks - Total number of teams drafting (e.g. 12 for a 12-team league)
-
-Usage: !draft rounds pick_position total_picks"""
+    help="🎮 Start a fantasy basketball draft\n\n"
+         "Description:\n"
+         "• Initialize new draft session\n"
+         "• Set custom rounds and team count\n"
+         "• Configure your draft position\n\n"
+         "Usage: `!draft rounds pick_position total_picks`\n"
+         "Example: `!draft 13 1 12`"
 )
 async def draft(ctx, rounds: int, pick_position: int, total_picks: int):
     """Start a fantasy basketball draft session."""
@@ -108,21 +149,16 @@ async def draft(ctx, rounds: int, pick_position: int, total_picks: int):
 
 @bot.command(
     name="pick",
-    help="""Record a draft pick.
-Arguments:
-• pick_number - The overall pick number in the draft (e.g. 1 for first pick)
-• player_name - Name of the player being drafted (e.g. "LeBron James" or "LeBron")
-• position - REQUIRED when it's your turn to draft. Must be one of: PG/SG/SF/PF/C/UTIL
-
-Usage when it's your turn:
-!pick <pick_number> <player_name> <position>
-
-Usage for other picks:
-!pick <pick_number> <player_name> [position]""",
-    
+    help="✏️ Record a draft pick\n\n"
+         "Description:\n"
+         "• Record player selections\n"
+         "• Assign positions to your picks\n"
+         "• Track draft progress\n\n"
+         "Usage: `!pick number \"player_name\" [position]`\n"
+         "Example: `!pick 1 \"LeBron James\" SF`"
 )
 async def pick(ctx, pick_num: int, player_name: str, *args):
-    """Record a draft pick. Position (PG/SG/SF/PF/C/UTIL) is required when it's your turn to assign the player to your lineup."""
+    """Record a draft pick."""
     # Check if draft exists and is active
     if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
         await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
@@ -162,14 +198,12 @@ async def pick(ctx, pick_num: int, player_name: str, *args):
 
 @bot.command(
     name="getrec",
-    help="""Get draft recommendations based on your draft position and current state.
-Shows:
-• Draft position analysis
-• Draft strategy
-• Top available players
-• Best picks for your position
-
-Usage: !getrec"""
+    help="💡 Get draft recommendations\n\n"
+         "Description:\n"
+         "• Get best available players\n"
+         "• Receive strategic advice\n"
+         "• Analyze team needs\n\n"
+         "Usage: `!getrec`"
 )
 async def getrec(ctx):
     """Get draft recommendations considering draft position and current state."""
@@ -185,11 +219,12 @@ async def getrec(ctx):
 
 @bot.command(
     name="players",
-    help="""Show the list of available NBA players ranked by fantasy value.
-During draft: Shows only undrafted players
-Outside draft: Shows all NBA players with their stats
-
-Usage: !players"""
+    help="📊 Show available players\n\n"
+         "Description:\n"
+         "• View all available players\n"
+         "• See fantasy rankings\n"
+         "• Check player statistics\n\n"
+         "Usage: `!players`"
 )
 async def players(ctx):
     """Show the list of available NBA players."""
@@ -200,13 +235,12 @@ async def players(ctx):
 
 @bot.command(
     name="myteam",
-    help="""Show your current team in the draft.
-Displays:
-• Players grouped by position
-• Team stats and information
-• Draft status and progress
-
-Usage: !myteam"""
+    help="👥 View your current team\n\n"
+         "Description:\n"
+         "• See your drafted players\n"
+         "• Check team composition\n"
+         "• View roster by position\n\n"
+         "Usage: `!myteam`"
 )
 async def myteam(ctx):
     """Show your current team in the draft."""
@@ -215,7 +249,16 @@ async def myteam(ctx):
         await ctx.send(response)
 
 
-@bot.command(name="news", help="Get the latest news about an NBA player. Usage: !news player_name")
+@bot.command(
+    name="news",
+    help="📰 Get player news and updates\n\n"
+         "Description:\n"
+         "• Check injury status\n"
+         "• See recent performance\n"
+         "• Get latest updates\n\n"
+         "Usage: `!news \"player_name\"`\n"
+         "Example: `!news \"LeBron James\"`"
+)
 async def news(ctx, player_name: str, *, rest: str = ""):
     """Get recent news and updates about an NBA player."""
     # Combine player name if it was split across arguments
