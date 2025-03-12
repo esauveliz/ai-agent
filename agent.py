@@ -548,7 +548,8 @@ class MistralAgent:
         response_content = response.choices[0].message.content
         self._update_history(channel_id, "assistant", response_content)
 
-        return response_content
+        # Add block quote formatting
+        return f">>> {response_content}"
 
     def _find_player_match(self, search_name: str, players_map: Dict[str, Dict[str, str]]) -> Optional[Tuple[str, Dict[str, str]]]:
         """Find the best match for a player name in the players map."""
@@ -645,7 +646,7 @@ class MistralAgent:
     async def compare_players(self, players: List[str]) -> str:
         """Compare NBA players for fantasy basketball purposes."""
         if len(players) < 2:
-            return "Please provide at least 2 players to compare."
+            return ">>> Please provide at least 2 players to compare."
             
         players_str = ", ".join(players)
         
@@ -750,7 +751,7 @@ class MistralAgent:
             messages=messages,
         )
 
-        return response.choices[0].message.content
+        return f">>> {response.choices[0].message.content}"
 
     async def _get_players(self, force_refresh: bool = False) -> Dict[str, Dict[str, str]]:
         """Get players from cache if available and fresh, otherwise fetch new data.
@@ -863,7 +864,7 @@ class MistralAgent:
         """Initialize a new draft session"""
         # Check if there's already an active draft
         if channel_id in self.draft_states and self.draft_states[channel_id].is_active:
-            return "A draft is already in progress in this channel! Use !pick to record picks."
+            return ">>> A draft is already in progress in this channel! Use `!pick` to record picks."
         
         draft_state = DraftState(total_rounds, pick_position, total_players)
         
@@ -873,14 +874,14 @@ class MistralAgent:
             draft_state.available_players = [player[0] for player in players_with_stats.items()]
             
             if not draft_state.available_players:
-                return "Error: Could not fetch player list. Please try again later."
+                return ">>> Error: Could not fetch player list. Please try again later."
             
             # Activate the draft and store the state
             draft_state.is_active = True
             self.draft_states[channel_id] = draft_state
             
             # Return success message with draft info
-            return f"""🏀 Draft Successfully Started! 🏀
+            return f""">>> 🏀 Draft Successfully Started! 🏀
 
 Draft Settings:
 • Position: Pick {pick_position} of {total_players}
@@ -888,11 +889,11 @@ Draft Settings:
 • Total Picks: {total_rounds * total_players}
 
 Available Commands:
-• !pick <pick_number> <player_name> <position> - When it's your turn, you MUST specify a position to assign the player to your lineup
-• !pick <pick_number> <player_name> [position] - For other picks, position is optional
-• !getrec - Get draft recommendations based on current draft state
-• !myteam - View your current roster
-• !players - View available players
+• `!pick <pick_number> <player_name> <position>` - When it's your turn, you MUST specify a position to assign the player to your lineup
+• `!pick <pick_number> <player_name> [position]` - For other picks, position is optional
+• `!getrec` - Get draft recommendations based on current draft state
+• `!myteam` - View your current roster
+• `!players` - View available players
 
 Valid positions for your picks:
 • PG - Point Guard
@@ -906,28 +907,28 @@ Your pick will come up every {total_players} picks. Good luck! 🎯"""
             
         except Exception as e:
             logger.error(f"Error starting draft: {str(e)}")
-            return f"Error starting draft: {str(e)}\nPlease try again or contact support if the issue persists."
+            return f">>> Error starting draft: {str(e)}\nPlease try again or contact support if the issue persists."
 
     async def update_draft_pick(self, channel_id: int, pick_num: int, player_name: str, position: Optional[str] = None) -> str:
         """Update draft state with a new pick"""
         if channel_id not in self.draft_states or not self.draft_states[channel_id].is_active:
-            return "No active draft in this channel!"
+            return ">>> No active draft in this channel!"
         
         draft_state = self.draft_states[channel_id]
         
         try:
             if pick_num < 1:
-                return "Pick number must be positive!"
+                return ">>> Pick number must be positive!"
             
             if not player_name:
-                return "Please provide a player name!"
+                return ">>> Please provide a player name!"
             
             # Calculate if this pick corresponds to the user's position
             is_user_pick = pick_num == draft_state.pick_position
             
             # If it's user's pick, require position
             if is_user_pick and not position:
-                return "Please specify a position for your pick (PG/SG/SF/PF/C/UTIL)."
+                return ">>> Please specify a position for your pick (PG/SG/SF/PF/C/UTIL)."
             
             # Convert position string to enum if provided
             pos_enum = None
@@ -935,7 +936,7 @@ Your pick will come up every {total_players} picks. Good luck! 🎯"""
                 try:
                     pos_enum = Position[position]
                 except KeyError:
-                    return f"Invalid position '{position}'. Please use: PG, SG, SF, PF, C, or UTIL"
+                    return f">>> Invalid position '{position}'. Please use: PG, SG, SF, PF, C, or UTIL"
             
             # Find the best matching player in available players
             best_match = None
@@ -970,20 +971,20 @@ Your pick will come up every {total_players} picks. Good luck! 🎯"""
             # Check if draft is complete
             if draft_state.picks_made >= (draft_state.total_players * draft_state.total_rounds):
                 draft_state.is_active = False
-                return "🎉 Draft Complete! 🎉"
+                return ">>> 🎉 Draft Complete! 🎉"
             
             # If it's the next user's turn
             if draft_state.is_user_turn():
-                return f"""✅ Pick #{pick_num}: {best_match}{f" ({position})" if position else ""}
+                return f""">>> ✅ Pick #{pick_num}: {best_match}{f" ({position})" if position else ""}
 
 Draft Status:
 • Round: {draft_state.current_round}/{draft_state.total_rounds}
 • Pick: {pick_num}/{draft_state.total_players}
 
-🎯 It's your turn to draft! Use !getrec for recommendations.
+🎯 It's your turn to draft! Use `!getrec` for recommendations.
 
 To make your pick, use:
-!pick <pick_number> <player_name> <position>
+`!pick <pick_number> <player_name> <position>`
 
 Available positions:
 • PG - Point Guard
@@ -993,14 +994,14 @@ Available positions:
 • C - Center
 • UTIL - Utility"""
             
-            return f"""✅ Pick #{pick_num}: {best_match}{f" ({position})" if position else ""}
+            return f""">>> ✅ Pick #{pick_num}: {best_match}{f" ({position})" if position else ""}
 
 Draft Status:
 • Round: {draft_state.current_round}/{draft_state.total_rounds}
 • Pick: {pick_num}/{draft_state.total_players}"""
             
         except ValueError:
-            return "Invalid pick number! Please provide a valid number."
+            return ">>> Invalid pick number! Please provide a valid number."
 
     def _split_into_messages(self, content: str, chunk_size: int = 1900) -> List[str]:
         """Split a long message into chunks that fit within Discord's message limit.
@@ -1012,13 +1013,23 @@ Draft Status:
         Returns:
             List of message chunks
         """
+        # Check if the content already starts with block quote
+        has_block_quote = content.startswith(">>> ")
+        if has_block_quote:
+            # Remove the block quote prefix for splitting
+            content = content[4:]
+        
         responses = []
         current_chunk = ""
         
         for line in content.split('\n'):
             # If adding this line would exceed Discord's limit, start a new chunk
             if len(current_chunk) + len(line) + 1 > chunk_size:
-                responses.append(current_chunk)
+                # Add block quote prefix to chunk if it doesn't have it
+                if not has_block_quote:
+                    responses.append(f">>> {current_chunk}")
+                else:
+                    responses.append(f">>> {current_chunk}")
                 current_chunk = line
             else:
                 if current_chunk:
@@ -1027,14 +1038,17 @@ Draft Status:
         
         # Add the last chunk if it's not empty
         if current_chunk:
-            responses.append(current_chunk)
+            if not has_block_quote:
+                responses.append(f">>> {current_chunk}")
+            else:
+                responses.append(f">>> {current_chunk}")
             
         return responses
 
     async def get_draft_recommendation(self, channel_id: int) -> List[str]:
         """Get draft recommendations based on draft position and current state"""
         if channel_id not in self.draft_states or not self.draft_states[channel_id].is_active:
-            return ["No active draft in this channel!"]
+            return [">>> No active draft in this channel!"]
         
         draft_state = self.draft_states[channel_id]
         
@@ -1107,7 +1121,9 @@ Focus on:
 
 {needs_str}
 {response.choices[0].message.content}"""
-        return self._split_into_messages(full_response)
+        
+        # Add block quote to the beginning of the response
+        return self._split_into_messages(f">>> {full_response}")
 
     async def web_search(self, query: str) -> str:
         """Perform a web search using the web_search tool."""
@@ -1126,7 +1142,7 @@ Focus on:
             return search_result.choices[0].message.content
         except Exception as e:
             logger.error(f"Error in web search for query '{query}': {str(e)}")
-            return f"Error performing web search: {str(e)}"
+            return f">>> Error performing web search: {str(e)}"
 
     async def show_players(self, channel_id: int) -> List[str]:
         """Show the list of available NBA players ranked by fantasy value"""
@@ -1143,7 +1159,7 @@ Focus on:
             prefix = "NBA Players Ranked by Fantasy Value"
             
         if not players:
-            return ["Could not fetch player rankings. Please try again later."]
+            return [">>> Could not fetch player rankings. Please try again later."]
         
         # Build the full content first
         content = []
@@ -1219,19 +1235,20 @@ Focus on:
                 content.append(f"{i:>3}. {player_name}")
         
         # Join all content with newlines and split into messages
-        return self._split_into_messages('\n'.join(content))
+        # Add block quote at the beginning
+        return self._split_into_messages(f">>> {'\n'.join(content)}")
 
     async def show_my_team(self, channel_id: int) -> List[str]:
         """Show the user's current team in the draft"""
         if channel_id not in self.draft_states:
-            return ["No draft has been started in this channel. Use !draft to start a new draft."]
+            return [">>> No draft has been started in this channel. Use `!draft` to start a new draft."]
             
         draft_state = self.draft_states[channel_id]
         if not draft_state.is_active:
-            return ["The draft has ended. Start a new draft with !draft to build a new team."]
+            return [">>> The draft has ended. Start a new draft with `!draft` to build a new team."]
             
         if not draft_state.my_team:
-            return ["Your team is currently empty. Wait for your turn to draft or use !pick to record your picks."]
+            return [">>> Your team is currently empty. Wait for your turn to draft or use `!pick` to record your picks."]
             
         # Get the latest player stats
         all_players = await self._get_players()
@@ -1281,7 +1298,8 @@ Focus on:
         content.append(f"• Your Position: Pick {draft_state.pick_position} of {draft_state.total_players}")
         content.append(f"• Total Players Drafted: {len(draft_state.my_team)}")
         
-        return self._split_into_messages('\n'.join(content))
+        # Add block quote at the beginning
+        return self._split_into_messages(f">>> {'\n'.join(content)}")
 
     async def _scrape_real_time_news(self, player_name: str) -> Optional[dict]:
         """Get real-time news using NBA stats API and Basketball Reference."""
@@ -1404,7 +1422,7 @@ Focus on:
                     break
             
             if not player_id:
-                return ["❌ Player Not Found: Could not find player in database. Please check the spelling and try again."]
+                return [">>> ❌ Player Not Found: Could not find player in database. Please check the spelling and try again."]
             
             # Scrape ESPN player page
             url = f"https://www.espn.com/nba/player/_/id/{player_id}"
@@ -1415,7 +1433,7 @@ Focus on:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
-                        return [f"❌ Error: Could not access ESPN data for {player_name}"]
+                        return [f">>> ❌ Error: Could not access ESPN data for {player_name}"]
                     
                     html = await response.text()
                     soup = BeautifulSoup(html, 'html.parser')
@@ -1453,7 +1471,7 @@ Focus on:
                 
         except Exception as e:
             logger.error(f"Error getting news for {player_name}: {str(e)}")
-            return [f"❌ Error: Could not retrieve news for {player_name}. Please try again later."]
+            return [f">>> ❌ Error: Could not retrieve news for {player_name}. Please try again later."]
 
     def _format_news_message(self, player_name: str, team: str, news_time: Optional[str] = None,
                            news_content: Optional[str] = None, analysis: Optional[str] = None,

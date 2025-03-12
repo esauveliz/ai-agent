@@ -115,11 +115,12 @@ async def compare(ctx, *players):
     """Compare NBA players for fantasy basketball purposes."""
     # Check if we have at least 2 players to compare
     if len(players) < 2:
-        await ctx.send("Please provide at least 2 players to compare. Usage: !compare player1 player2 [player3 ...]")
+        await ctx.send(">>> Please provide at least 2 players to compare. Usage: `!compare player1 player2 [player3 ...]`")
         return
-
+        
     logger.info(f"Comparing players: {', '.join(players)}")
-    await ctx.send("⌛ Please wait 20 seconds-2 minutes while I analyze these players thoroughly...")
+    await ctx.send(">>> ⌛ Please wait 20 seconds-2 minutes while I analyze these players thoroughly...")
+    
     response = await agent.compare_players(list(players))
     await ctx.send(response)
 
@@ -137,7 +138,7 @@ async def compare(ctx, *players):
 async def draft(ctx, rounds: int, pick_position: int, total_picks: int):
     """Start a fantasy basketball draft session."""
     if rounds < 1 or pick_position < 1 or total_picks < 2 or pick_position > total_picks:
-        await ctx.send("Invalid draft parameters! Please ensure:\n"
+        await ctx.send(">>> Invalid draft parameters! Please ensure:\n"
                       "- Rounds is at least 1\n"
                       "- Pick position is between 1 and total picks\n"
                       "- Total picks is at least 2")
@@ -161,9 +162,9 @@ async def pick(ctx, pick_num: int, player_name: str, *args):
     """Record a draft pick."""
     # Check if draft exists and is active
     if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
-        await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
+        await ctx.send(">>> No active draft in this channel! Start a draft first using the `!draft` command.")
         return
-    
+        
     draft_state = agent.draft_states[ctx.channel.id]
     current_pick = (draft_state.picks_made % draft_state.total_players) + 1
     
@@ -174,18 +175,9 @@ async def pick(ctx, pick_num: int, player_name: str, *args):
         if current_pick == draft_state.pick_position:
             position = args[-1].upper()
             if position not in ["PG", "SG", "SF", "PF", "C", "UTIL"]:
-                await ctx.send("Invalid position! Please use: PG, SG, SF, PF, C, or UTIL")
+                await ctx.send(">>> Invalid position! Please use: PG, SG, SF, PF, C, or UTIL")
                 return
-            player_name_parts = args[:-1]  # All but last argument is player name
-        else:
-            # For non-user picks, check if last arg is a valid position
-            last_arg = args[-1].upper()
-            if last_arg in ["PG", "SG", "SF", "PF", "C", "UTIL"]:
-                position = last_arg
-                player_name_parts = args[:-1]
-            else:
-                # All args are part of the player name
-                player_name_parts = args
+        player_name_parts = args[:-1]  # All but last argument is player name
     else:
         player_name_parts = []
     
@@ -209,7 +201,7 @@ async def getrec(ctx):
     """Get draft recommendations considering draft position and current state."""
     # Check if draft exists and is active
     if not hasattr(agent, 'draft_states') or ctx.channel.id not in agent.draft_states or not agent.draft_states[ctx.channel.id].is_active:
-        await ctx.send("No active draft in this channel! Start a draft first using the !draft command.")
+        await ctx.send(">>> No active draft in this channel! Start a draft first using the `!draft` command.")
         return
         
     responses = await agent.get_draft_recommendation(ctx.channel.id)
