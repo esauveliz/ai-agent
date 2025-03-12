@@ -643,10 +643,10 @@ class MistralAgent:
             
         return None
 
-    async def compare_players(self, players: List[str]) -> str:
+    async def compare_players(self, players: List[str]) -> List[str]:
         """Compare NBA players for fantasy basketball purposes."""
         if len(players) < 2:
-            return ">>> Please provide at least 2 players to compare."
+            return [">>> Please provide at least 2 players to compare."]
             
         players_str = ", ".join(players)
         
@@ -663,7 +663,6 @@ class MistralAgent:
             match = self._find_player_match(player, self.cached_players)
             if match:
                 player_name, stats = match
-                # Get numerical rank from stats
                 try:
                     rank = int(stats.get('RANK', '999'))
                 except ValueError:
@@ -672,7 +671,7 @@ class MistralAgent:
                     "exact_name": player_name,
                     "stats": stats,
                     "rank": rank,
-                    "injury_status": "Unknown"  # Will be updated with real-time check
+                    "injury_status": "Unknown"
                 }
             else:
                 unmatched_players.append(player)
@@ -751,7 +750,26 @@ class MistralAgent:
             messages=messages,
         )
 
-        return f">>> {response.choices[0].message.content}"
+        # Format final response with consistent styling
+        sections = []
+        
+        # Header
+        sections.append(f"{'='*50}")
+        sections.append(f"🔄 Player Comparison | {players_str}")
+        sections.append(f"{'='*50}")
+        
+        # Main comparison content
+        sections.append(f"\n{response.choices[0].message.content}")
+        
+        # Footer
+        sections.append(f"\n{'='*50}")
+        sections.append("💡 For more details:")
+        sections.append("• Use `!news <player>` to get latest updates")
+        sections.append("• Use `!players` to see all player rankings")
+        sections.append(f"{'='*50}")
+        
+        # Split into chunks and add block quote
+        return self._split_into_messages(">>> " + "\n".join(sections))
 
     async def _get_players(self, force_refresh: bool = False) -> Dict[str, Dict[str, str]]:
         """Get players from cache if available and fresh, otherwise fetch new data.
@@ -894,6 +912,7 @@ Available Commands:
 • `!getrec` - Get draft recommendations based on current draft state
 • `!myteam` - View your current roster
 • `!players` - View available players
+• `!enddraft` - End the current draft session
 
 Valid positions for your picks:
 • PG - Point Guard
@@ -1236,7 +1255,7 @@ Focus on:
         
         # Join all content with newlines and split into messages
         # Add block quote at the beginning
-        return self._split_into_messages(f">>> {'\n'.join(content)}")
+        return self._split_into_messages(">>> {}".format("\n".join(content)))
 
     async def show_my_team(self, channel_id: int) -> List[str]:
         """Show the user's current team in the draft"""
@@ -1299,7 +1318,7 @@ Focus on:
         content.append(f"• Total Players Drafted: {len(draft_state.my_team)}")
         
         # Add block quote at the beginning
-        return self._split_into_messages(f">>> {'\n'.join(content)}")
+        return self._split_into_messages(">>> {}".format("\n".join(content)))
 
     async def _scrape_real_time_news(self, player_name: str) -> Optional[dict]:
         """Get real-time news using NBA stats API and Basketball Reference."""
@@ -1513,3 +1532,75 @@ Focus on:
         
         # Join all sections and add block quote at the start
         return ">>> " + "\n".join(sections)
+
+    async def end_draft(self, channel_id: int) -> List[str]:
+        """End the current draft and display final results."""
+        if channel_id not in self.draft_states:
+            return [">>> No draft has been started in this channel."]
+        
+        draft_state = self.draft_states[channel_id]
+        if not draft_state.is_active:
+            return [">>> There is no active draft to end."]
+        
+        # Mark draft as inactive
+        draft_state.is_active = False
+        
+        # Get the latest player stats for the summary
+        all_players = await self._get_players()
+        
+        content = []
+        content.append("🏁 Draft Complete! Final Results 🏁\n")
+        
+        # Display draft settings
+        content.append("Draft Settings:")
+        content.append(f"• Total Rounds: {draft_state.total_rounds}")
+        content.append(f"• Draft Position: {draft_state.pick_position} of {draft_state.total_players}")
+        content.append(f"• Total Picks Made: {draft_state.picks_made}\n")
+        
+        # Display final team roster by position
+        content.append("Your Final Team:")
+        players_by_position = defaultdict(list)
+        for player, position in draft_state.my_team:
+            players_by_position[position if position else "FLEX"].append(player)
+        
+        for position in Position:
+            players = players_by_position.get(position, [])
+            if players:
+                content.append(f"\n{position.value}:")
+                for player in players:
+                    # Get player stats if available
+                    match = self._find_player_match(player, all_players)
+                    if match:
+                        player_name, stats = match
+                        content.append(f"  • {player_name}")
+                        content.append(f"    - Team: {stats.get('TEAM', 'N/A')}")
+                        content.append(f"    - Position: {stats.get('POS', 'N/A')}")
+                        content.append(f"    - Rank: {stats.get('R#', 'N/A')}")
+                    else:
+                        content.append(f"  • {player}")
+        
+        # Show flex/unassigned players if any
+        flex_players = players_by_position.get("FLEX", [])
+        if flex_players:
+            content.append("\nUnassigned Players:")
+            for player in flex_players:
+                match = self._find_player_match(player, all_players)
+                if match:
+                    player_name, stats = match
+                    content.append(f"  • {player_name}")
+                    content.append(f"    - Team: {stats.get('TEAM', 'N/A')}")
+                    content.append(f"    - Position: {stats.get('POS', 'N/A')}")
+                    content.append(f"    - Rank: {stats.get('R#', 'N/A')}")
+                else:
+                    content.append(f"  • {player}")
+        
+        # Add a footer
+        content.append("\n" + "="*50)
+        content.append("Draft has been ended. Start a new draft with `!draft` command.")
+        content.append("="*50)
+        
+        # Clean up draft state
+        del self.draft_states[channel_id]
+        
+        # Split into chunks and return
+        return self._split_into_messages(">>> {}".format("\n".join(content)))

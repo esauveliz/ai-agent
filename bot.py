@@ -24,7 +24,7 @@ class CustomHelpCommand(commands.HelpCommand):
         # Add command fields to embed
         embed.add_field(
             name="📊 Draft Commands",
-            value="```!draft - Start a new draft session\n!pick - Record a draft pick\n!getrec - Get draft recommendations\n!myteam - View your team\n!players - Show available players```",
+            value="```!draft - Start a new draft session\n!enddraft - End current draft session\n!pick - Record a draft pick\n!getrec - Get draft recommendations\n!myteam - View your team\n!players - Show available players```",
             inline=False
         )
         
@@ -121,8 +121,11 @@ async def compare(ctx, *players):
     logger.info(f"Comparing players: {', '.join(players)}")
     await ctx.send(">>> ⌛ Please wait 20 seconds-2 minutes while I analyze these players thoroughly...")
     
-    response = await agent.compare_players(list(players))
-    await ctx.send(response)
+    # Get responses as a list of messages
+    responses = await agent.compare_players(list(players))
+    # Send each response chunk separately
+    for response in responses:
+        await ctx.send(response)
 
 
 @bot.command(
@@ -258,6 +261,22 @@ async def news(ctx, player_name: str, *, rest: str = ""):
     
     logger.info(f"Fetching news for player: {full_player_name}")
     responses = await agent.get_player_news(full_player_name)
+    for response in responses:
+        await ctx.send(response)
+
+
+@bot.command(
+    name="enddraft",
+    help="🏁 End the current draft\n\n"
+         "Description:\n"
+         "• End ongoing draft session\n"
+         "• Display final draft results\n"
+         "• Show complete team roster\n\n"
+         "Usage: `!enddraft`"
+)
+async def enddraft(ctx):
+    """End the current draft and display results."""
+    responses = await agent.end_draft(ctx.channel.id)
     for response in responses:
         await ctx.send(response)
 
